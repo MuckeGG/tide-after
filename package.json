@@ -1,12 +1,16 @@
 {
-  "name": "vibe-coding-starter-pack-2d-survival",
+  "name": "tide-after-web",
   "private": true,
   "version": "0.0.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
-    "lint": "eslint .",
+    "test": "vitest run",
+    "lint": "eslint client/src/App.tsx client/src/main.tsx client/src/tide client/src/components/tide",
+    "lint:upstream": "eslint .",
+    "spacetime:build": "spacetime build --module-path server",
+    "spacetime:generate": "spacetime generate --lang typescript --out-dir client/src/tide/generated --module-path server",
     "preview": "vite preview"
   },
   "dependencies": {
@@ -16,11 +20,10 @@
     "@dnd-kit/utilities": "^3.2.2",
     "@openauthjs/openauth": "^0.4.3",
     "@supabase/supabase-js": "^2.49.4",
-    "@types/bcrypt": "^5.0.2",
-    "bcrypt": "^5.1.1",
     "jose": "^6.0.10",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
+    "spacetimedb": "^2.8.1",
     "use-debounce": "^10.0.4"
   },
   "devDependencies": {
@@ -35,6 +38,7 @@
     "globals": "^15.15.0",
     "typescript": "~5.7.2",
     "typescript-eslint": "^8.24.1",
-    "vite": "^6.2.0"
+    "vite": "^6.2.0",
+    "vitest": "^4.1.10"
   }
 }

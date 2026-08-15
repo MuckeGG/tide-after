@@ -7,20 +7,20 @@ export default defineConfig({
     server: {
         port: 3008,
     },
-    root: 'client',
     publicDir: 'public',
     build: {
-        outDir: '../dist',
+        outDir: 'dist',
         assetsDir: 'assets',
+        emptyOutDir: true,
         rollupOptions: {
             input: {
-                main: path.resolve(__dirname, 'client/index.html'),
+                main: path.resolve(__dirname, './index.html'),
             },
         },
     },
     resolve: {
         alias: {
-            '@': path.resolve(__dirname, './client/src'),
+            '@': path.resolve(__dirname, './src'),
         },
     },
 });
