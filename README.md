@@ -71,6 +71,8 @@
 
 需要 [Node.js](https://nodejs.org/) 20 或更高版本。
 
+使用代码 Agent 维护本项目时，请先阅读仓库级协作与运行指南 [AGENTS.md](./AGENTS.md)。
+
 ```bash
 npm install
 npm run dev
@@ -151,6 +153,7 @@ public/assets/tide-original/     公开版本原创运行时素材
 art-source/tide-original/        原创美术源文件、透明化中间稿和旧角色归档
 scripts/                         素材处理与生产构建审计脚本
 server/src/tide_after.rs         SpacetimeDB 数据表与 Reducer
+AGENTS.md                        Agent 运行、修改、验证与 GitHub 交付指南
 ASSETS.md                        素材来源、生成过程与许可边界
 UPSTREAM.md                      上游项目来源与改造边界
 ```
