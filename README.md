@@ -1,8 +1,8 @@
 # 潮线之后 / Tide After
 
-一款 2D 俯视角、像素风、单人海上木筏生存网页游戏。项目以 MIT 许可的 [ThinkTidevibes/2D-Survival-Multiplayer-Game](https://github.com/thinktidevibes/2D-Survival-Multiplayer-Game) 为技术底座，保留其 Git 历史、React/Vite/TypeScript 工程和 SpacetimeDB 架构，再将首屏与核心循环改造成原创木筏玩法。
+一款 2.5D 俯视角、像素风、单人海上木筏生存网页游戏。项目以 MIT 许可的 [ThinkTidevibes/2D-Survival-Multiplayer-Game](https://github.com/thinktidevibes/2D-Survival-Multiplayer-Game) 为技术底座，保留其 Git 历史、React/Vite/TypeScript 工程和 SpacetimeDB 架构，再将首屏与核心循环改造成原创木筏玩法。
 
-![潮线之后桌面端运行画面](./preview-tide-after-v2.png)
+![潮线之后 2.5D 桌面端运行画面](./preview-tide-after-25d.png)
 
 ## 游戏内容
 
@@ -18,6 +18,10 @@
 - 补给箱、风墙、遇难者、旧世界无人机和鲸群等随机海上事件。
 - 第 12 天建成信标后解锁无尽远航，继续刷新每日合约与最高分。
 - 种子驱动的昼夜、晴浪/阴潮/风暴天气，以及第 3 天开始的船体损伤。
+- 独立 60 FPS Canvas 渲染循环、底边深度排序、甲板侧厚、设施遮挡、三层海浪与最多 200 个粒子。
+- 原创厚重潜水工四向精灵，以及打捞、收线、建造、进食、维修和受伤动作。
+- 单一“当前目标”引导、风暴预警、普通/完美/脱钩三级钓鱼结果。
+- 沉浸式铜制 HUD、8 格快捷栏、滑出式建造抽屉和手机端连续移动动作轮。
 - 匿名游客身份、独立 `runId`、每 1.8 秒自动检查点、页面离开保存和 v1→v2 存档迁移。
 - 可选 SpacetimeDB 云快照与服务端规范化表/Reducer；离线时完整玩法仍可运行。
 
@@ -40,20 +44,30 @@ npm run dev
 npm test
 npm run lint
 npm run build
+npm run verify:assets
 npm audit --omit=dev
 ```
 
-当前测试包含 19 项规则验证，其中包括完整建造依赖链、事件、教程奖励、自动化、旧存档迁移和确定性的 12 天长局模拟。
+当前测试包含 28 项验证：原 19 项规则测试全部保留，并新增动作优先级、关键帧单次提交、移动锁、素材回退、单一目标和完美收线测试。
 
 ## 控制
 
 | 操作 | 桌面端 | 手机端 |
 | --- | --- | --- |
-| 移动 | WASD / 方向键 | 场景左下虚拟方向键 |
-| 打捞 | E / 点击附近漂浮物 | “钩”按钮 / 点击漂浮物 |
-| 钓鱼与收线 | 空格 / F | “鱼”按钮 / 钓鱼浮层按钮 |
-| 食用、饮水、维修 | 场景下方物资栏 | 场景下方物资栏 |
-| 建造、研究、航海志 | 右侧木筏控制台 | 场景下方木筏控制台 |
+| 移动 | WASD / 方向键 | 按住左下方向盘连续移动 |
+| 打捞 | E / 点击漂浮物自动锁定 | 右下上下文按钮 / “钩”按钮 |
+| 钓鱼与收线 | 空格 / F | 右下上下文按钮 / “竿”按钮 |
+| 食用、饮水、维修 | 点击快捷栏 / 左上维修 | 点击快捷栏 / 上下文动作 |
+| 建造、研究、航海志 | 右侧滑出抽屉 | 底部全宽滑出抽屉 |
+
+## 本地参考素材模式
+
+默认开发和生产构建都使用原创素材。若只在本机比较木材与 UI 纹理，可在 .env.local 显式配置：
+
+    VITE_TIDE_ART_MODE=reference
+    TIDE_REFERENCE_ASSET_ROOT=C:/Users/your-name/Desktop/Content
+
+参考模式只读提供固定白名单；文件缺失会回退原创素材。参考模式禁止生产构建，详细边界见 [ASSETS.md](./ASSETS.md)。
 
 ## 可选 SpacetimeDB 模式
 
@@ -84,7 +98,8 @@ VITE_SPACETIME_MODULE=tide-after
 ## 项目结构
 
 ```text
-client/src/tide/                 状态类型、配置、规则、测试、存档和云桥
+client/src/tide/                 状态类型、配置、规则、引导、测试、存档和云桥
+client/src/tide/visual/          素材清单、动作控制器、rAF 2.5D 渲染器
 client/src/tide/generated/       SpacetimeDB TypeScript bindings
 client/src/components/tide/      Canvas 场景、HUD、建造/研究/航海界面
 server/src/tide_after.rs         SpacetimeDB 表与服务端 Reducer
@@ -96,13 +111,15 @@ UPSTREAM.md                      上游来源与改造边界
 
 - `npm run build`：通过。
 - `npm run lint`：通过。
-- `npm test`：19/19 通过。
+- `npm test`：28/28 通过。
 - `npm audit --omit=dev`：0 个已知漏洞。
 - SpacetimeDB WASM 模块：成功构建，bindings 已重新生成。
-- 1440×900 桌面端：教程、钓鱼、建造/研究/航海志、事件均可操作，无控制台异常和横向溢出。
-- 390×844 手机端：触控移动、操作按钮和控制台均可操作，无控制台异常和横向溢出。
+- 1440×900 桌面端：移动、抛钩、抛竿/收线、饮水、维修、三锤建造和抽屉均通过，无控制台异常和横向溢出。
+- 390×844 手机端：长按连续移动、上下文动作轮和全宽抽屉通过，无控制台异常和横向溢出。
+- 浏览器实测桌面与手机渲染均为 60 FPS，活动粒子不超过 200。
+- 生产构建审计通过；参考模式生产构建会被主动拒绝。
 
-![潮线之后手机端运行画面](./preview-tide-after-v2-mobile.png)
+![潮线之后 2.5D 手机端运行画面](./preview-tide-after-25d-mobile.png)
 
 ## 当前边界
 

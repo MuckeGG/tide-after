@@ -494,14 +494,19 @@ export const resolveFishing = (state: TideGameState) => {
   const next = cloneState(state);
   const { marker, targetStart, targetWidth } = next.fishing;
   const success = marker >= targetStart && marker <= targetStart + targetWidth;
+  const targetCenter = targetStart + targetWidth / 2;
+  const perfect = success && Math.abs(marker - targetCenter) <= targetWidth * 0.18;
   next.fishing.active = false;
   if (success) {
     const doubleChance = 0.28 + next.progress.perks.angler * 0.08;
-    const fishCount = 1 + (takeRandom(next) < doubleChance ? 1 : 0) + (next.world.route === 'fishing' ? 1 : 0);
+    const fishCount = 1
+      + (perfect ? 1 : 0)
+      + (takeRandom(next) < doubleChance ? 1 : 0)
+      + (next.world.route === 'fishing' ? 1 : 0);
     next.inventory.fish += fishCount;
     next.progress.stats.fishCaught += fishCount;
-    awardXp(next, 12 + fishCount * 4);
-    addNotice(next, `收线成功：鲜鱼 +${fishCount}`, 'good');
+    awardXp(next, 12 + fishCount * 4 + (perfect ? 6 : 0));
+    addNotice(next, perfect ? `完美收线：鲜鱼 +${fishCount}` : `普通收线：鲜鱼 +${fishCount}`, 'good');
     if (takeRandom(next) < 0.1 + next.progress.perks.salvage * 0.04) {
       next.inventory.parts += 1;
       addNotice(next, '鱼钩还带回了一枚精密零件。', 'good');
@@ -929,4 +934,14 @@ export const getNearestCollectableId = (state: TideGameState) => {
     .filter((item) => item.distance <= range)
     .sort((a, b) => a.distance - b.distance)[0];
   return nearest?.id ?? null;
+};
+
+export const getStormWarningSeconds = (state: TideGameState) => {
+  if (state.world.day < 3 || state.world.weather === 'storm') return null;
+  const blockLength = 42;
+  const currentBlock = Math.floor(state.world.elapsedSeconds / blockLength);
+  const nextBlockAt = (currentBlock + 1) * blockLength;
+  const nextWeather = weatherFor(state.world.seed, nextBlockAt + 0.01);
+  const seconds = nextBlockAt - state.world.elapsedSeconds;
+  return nextWeather === 'storm' && seconds <= 14 ? Math.max(0, seconds) : null;
 };

@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
+    "verify:assets": "node scripts/verify-production-assets.mjs",
     "test": "vitest run",
     "lint": "eslint client/src/App.tsx client/src/main.tsx client/src/tide client/src/components/tide",
     "lint:upstream": "eslint .",

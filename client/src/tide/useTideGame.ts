@@ -42,6 +42,8 @@ export const useTideGame = () => {
   const [lastSavedAt, setLastSavedAt] = useState(state.updatedAt);
   const [cloudStatus, setCloudStatus] = useState<CloudStatus>('local');
   const pressedKeys = useRef(new Set<string>());
+  const continuousMove = useRef<[number, number] | null>(null);
+  const movementLocked = useRef(false);
   const stateRef = useRef(state);
   const bridgeRef = useRef<TideSpacetimeBridge | null>(null);
 
@@ -68,11 +70,17 @@ export const useTideGame = () => {
         let next = tickGame(current, 0.1);
         let x = 0;
         let y = 0;
-        for (const key of pressedKeys.current) {
-          const direction = MOVEMENT_KEYS[key];
-          if (direction) {
-            x += direction[0];
-            y += direction[1];
+        if (!movementLocked.current) {
+          for (const key of pressedKeys.current) {
+            const direction = MOVEMENT_KEYS[key];
+            if (direction) {
+              x += direction[0];
+              y += direction[1];
+            }
+          }
+          if (continuousMove.current) {
+            x += continuousMove.current[0];
+            y += continuousMove.current[1];
           }
         }
         if (x || y) next = movePlayer(next, x, y, 0.1);
@@ -115,19 +123,14 @@ export const useTideGame = () => {
         pressedKeys.current.add(key);
         event.preventDefault();
       }
-      if (key === 'e' && !event.repeat) {
-        collect();
-        event.preventDefault();
-      }
-      if ((key === ' ' || key === 'f') && !event.repeat) {
-        fish();
-        event.preventDefault();
-      }
     };
     const onKeyUp = (event: KeyboardEvent) => {
       pressedKeys.current.delete(event.key.toLowerCase());
     };
-    const clearKeys = () => pressedKeys.current.clear();
+    const clearKeys = () => {
+      pressedKeys.current.clear();
+      continuousMove.current = null;
+    };
     window.addEventListener('keydown', onKeyDown);
     window.addEventListener('keyup', onKeyUp);
     window.addEventListener('blur', clearKeys);
@@ -136,10 +139,25 @@ export const useTideGame = () => {
       window.removeEventListener('keyup', onKeyUp);
       window.removeEventListener('blur', clearKeys);
     };
-  }, [collect, fish]);
+  }, []);
 
   const move = useCallback((x: number, y: number) => {
+    if (movementLocked.current) return;
     setState((current) => movePlayer(current, x, y, 0.13));
+  }, []);
+
+  const startMove = useCallback((x: number, y: number) => {
+    if (movementLocked.current) return;
+    continuousMove.current = [x, y];
+  }, []);
+
+  const stopMove = useCallback(() => {
+    continuousMove.current = null;
+  }, []);
+
+  const setMovementLocked = useCallback((locked: boolean) => {
+    movementLocked.current = locked;
+    if (locked) continuousMove.current = null;
   }, []);
 
   const consume = useCallback((resource: ConsumableId) => {
@@ -187,6 +205,9 @@ export const useTideGame = () => {
     cloudStatus,
     actions: {
       move,
+      startMove,
+      stopMove,
+      setMovementLocked,
       collect,
       fish,
       consume,
