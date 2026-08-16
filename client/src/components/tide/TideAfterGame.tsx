@@ -9,6 +9,7 @@ import {
 } from 'react';
 import {
   ACHIEVEMENTS,
+  BUILD_CATEGORY_LABELS,
   CHAPTERS,
   EQUIPMENT_LABELS,
   PERKS,
@@ -22,17 +23,24 @@ import {
   canAfford,
   EVENT_PRESENTATIONS,
   getContractProgress,
+  getPlacementWorldPoint,
   getStormWarningSeconds,
   getXpToNext,
+  isEdgePlacement,
+  validatePlacement,
 } from '../../tide/game';
 import { getPrimaryAction } from '../../tide/guidance';
 import type {
+  BuildCategory,
+  ModulePlacement,
   PerkId,
   EquipmentId,
+  PlaceableModuleId,
   RaftModuleId,
   ResourceId,
   RouteMode,
   TideGameState,
+  PlacementIntent,
 } from '../../tide/types';
 import { useTideGame } from '../../tide/useTideGame';
 import { loadTideVisualAssets } from '../../tide/visual/assets';
@@ -69,6 +77,12 @@ const RESOURCE_GLYPHS: Record<ResourceId, string> = {
 };
 
 const WEATHER_LABELS = { clear: '晴朗', cloudy: '阴潮', storm: '风暴' } as const;
+const ADVANCED_MOVE_LABEL: Partial<Record<PlaceableModuleId, string>> = {
+  workshop: '废铁 ×1',
+  sail: '废铁 ×1',
+  radio: '废铁 ×1',
+  beacon: '废铁 ×1',
+};
 const PANEL_TABS = [
   { id: 'build', label: '建造', glyph: '⚒' },
   { id: 'research', label: '研究', glyph: '⌬' },
@@ -102,17 +116,56 @@ const formatDuration = (seconds: number) => {
     : Math.floor(seconds) + ' 秒';
 };
 
+/** 把屏幕坐标换算成最近的候选摆放位置。 */
+const resolveHoverPlacement = (
+  state: TideGameState,
+  moduleId: PlaceableModuleId,
+  x: number,
+  y: number,
+): ModulePlacement | null => {
+  const candidates: ModulePlacement[] = [];
+  if (isEdgePlacement(moduleId)) {
+    for (const side of ['north', 'east', 'south', 'west'] as const) {
+      for (let index = 0; index < state.raft.size; index += 1) {
+        candidates.push({ kind: 'edge', side, index });
+      }
+    }
+  } else {
+    for (let gridY = 0; gridY < state.raft.size; gridY += 1) {
+      for (let gridX = 0; gridX < state.raft.size; gridX += 1) {
+        candidates.push({ kind: 'tile', gridX, gridY });
+      }
+    }
+  }
+  let best: ModulePlacement | null = null;
+  let bestDistance = 52;
+  for (const candidate of candidates) {
+    const projected = projectWorldPoint(getPlacementWorldPoint(state, candidate));
+    const distance = Math.hypot(projected.x - x, projected.y - y);
+    if (distance < bestDistance) {
+      best = candidate;
+      bestDistance = distance;
+    }
+  }
+  return best;
+};
+
 function OceanCanvas({
   state,
   visualRef,
   movementIntentRef,
   effectsRef,
+  placementRef,
   onSceneAction,
+  onPlacementHover,
+  onPlacementConfirm,
+  onPlacementCancel,
 }: {
   state: TideGameState;
   visualRef: MutableRefObject<PlayerVisualState>;
   movementIntentRef: MutableRefObject<MovementIntent>;
   effectsRef: MutableRefObject<VisualEffect[]>;
+  placementRef: MutableRefObject<PlacementIntent | null>;
   onSceneAction: (action: {
     kind: 'collect' | 'fish' | 'attack' | 'repair' | 'invalid';
     target: { x: number; y: number };
@@ -120,6 +173,9 @@ function OceanCanvas({
     enemyId?: string;
     pointerToken: string;
   }) => void;
+  onPlacementHover: (placement: ModulePlacement | null) => void;
+  onPlacementConfirm: (placement: ModulePlacement) => void;
+  onPlacementCancel: () => void;
 }) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const stateRef = useRef(state);
@@ -160,6 +216,7 @@ function OceanCanvas({
         assetsRef.current,
         effectsRef.current,
         movementIntentRef.current,
+        placementRef.current,
         now,
         memory,
       );
@@ -176,9 +233,48 @@ function OceanCanvas({
     };
     frame = window.requestAnimationFrame(render);
     return () => window.cancelAnimationFrame(frame);
-  }, [effectsRef, movementIntentRef, visualRef]);
+  }, [effectsRef, movementIntentRef, placementRef, visualRef]);
+
+  const screenPointFromEvent = (event: ReactPointerEvent<HTMLCanvasElement>) => {
+    const canvas = canvasRef.current;
+    if (!canvas) return null;
+    const bounds = canvas.getBoundingClientRect();
+    const scale = Math.max(bounds.width / WORLD.width, bounds.height / WORLD.height);
+    const renderedWidth = WORLD.width * scale;
+    const renderedHeight = WORLD.height * scale;
+    const offsetX = (bounds.width - renderedWidth) / 2;
+    const offsetY = (bounds.height - renderedHeight) / 2;
+    return {
+      x: (event.clientX - bounds.left - offsetX) / scale,
+      y: (event.clientY - bounds.top - offsetY) / scale,
+    };
+  };
+
+  const onPointerMove = (event: ReactPointerEvent<HTMLCanvasElement>) => {
+    const intent = placementRef.current;
+    if (!intent) return;
+    const point = screenPointFromEvent(event);
+    if (!point) return;
+    onPlacementHover(resolveHoverPlacement(state, intent.moduleId, point.x, point.y));
+  };
 
   const onPointerDown = (event: ReactPointerEvent<HTMLCanvasElement>) => {
+    const intent = placementRef.current;
+    if (intent) {
+      if (event.button === 2) {
+        onPlacementCancel();
+        return;
+      }
+      const point = screenPointFromEvent(event);
+      if (!point) return;
+      const hover = resolveHoverPlacement(state, intent.moduleId, point.x, point.y);
+      if (hover) {
+        onPlacementHover(hover);
+        const check = validatePlacement(state, intent.moduleId, hover);
+        if (check.ok) onPlacementConfirm(hover);
+      }
+      return;
+    }
     const pointerToken = pointerGateRef.current.begin(
       event.pointerId,
       event.button,
@@ -193,14 +289,9 @@ function OceanCanvas({
     } catch {
       // Keep scene actions usable in browsers that decline pointer capture.
     }
-    const bounds = canvas.getBoundingClientRect();
-    const scale = Math.max(bounds.width / WORLD.width, bounds.height / WORLD.height);
-    const renderedWidth = WORLD.width * scale;
-    const renderedHeight = WORLD.height * scale;
-    const offsetX = (bounds.width - renderedWidth) / 2;
-    const offsetY = (bounds.height - renderedHeight) / 2;
-    const x = (event.clientX - bounds.left - offsetX) / scale;
-    const y = (event.clientY - bounds.top - offsetY) / scale;
+    const point = screenPointFromEvent(event);
+    if (!point) return;
+    const { x, y } = point;
     const logicalTarget = unprojectScreenPoint({ x, y });
     if (state.fishing.active || visualRef.current.action === 'fishWait') {
       onSceneAction({ kind: 'fish', target: logicalTarget, pointerToken });
@@ -260,9 +351,16 @@ function OceanCanvas({
       width={WORLD.width}
       height={WORLD.height}
       onPointerDown={onPointerDown}
+      onPointerMove={onPointerMove}
       onPointerUp={releasePointer}
       onPointerCancel={releasePointer}
       onLostPointerCapture={releasePointer}
+      onContextMenu={(event) => {
+        if (placementRef.current) {
+          event.preventDefault();
+          onPlacementCancel();
+        }
+      }}
       aria-label="2:1 等距海上木筏场景，点击漂浮物可自动锁定打捞"
     />
   );
@@ -298,56 +396,146 @@ function MiniProgress({ value, max }: { value: number; max: number }) {
 
 function BuildPanel({
   state,
-  build,
+  startWholeBuild,
+  startPlaceBuild,
+  startMove,
+  locate,
   busy,
 }: {
   state: TideGameState;
-  build: (id: RaftModuleId) => boolean;
+  startWholeBuild: (id: RaftModuleId) => boolean;
+  startPlaceBuild: (id: PlaceableModuleId) => void;
+  startMove: (id: PlaceableModuleId) => void;
+  locate: (id: PlaceableModuleId) => void;
   busy: boolean;
 }) {
+  const growthStages = UPGRADES.filter((upgrade) => upgrade.category === 'growth');
+  const deck = growthStages[0];
+  const reinforced = growthStages[1];
+  const categories: BuildCategory[] = ['survival', 'engineering', 'navigation'];
+  const builtPlaceables = UPGRADES
+    .filter((upgrade) => upgrade.category !== 'growth' && state.raft.modules[upgrade.id])
+    .map((upgrade) => upgrade as typeof upgrade & { id: PlaceableModuleId });
+
+  const renderStage = (upgrade: (typeof UPGRADES)[number], stageLabel: string) => {
+    const built = state.raft.modules[upgrade.id];
+    const levelLocked = state.progress.level < upgrade.unlockLevel;
+    const dependencyLocked = Boolean(upgrade.requires && !state.raft.modules[upgrade.requires]);
+    const signalLocked = (upgrade.signalRequired ?? 0) > state.progress.signalFragments;
+    const affordable = canAfford(state, upgrade.cost);
+    const missing = (Object.entries(upgrade.cost) as [ResourceId, number][])
+      .filter(([resource, amount]) => state.inventory[resource] < amount)
+      .map(([resource, amount]) => RESOURCE_LABELS[resource] + ' ' + (amount - state.inventory[resource]))
+      .join(' · ');
+    const disabled = busy || built || levelLocked || dependencyLocked || signalLocked || !affordable;
+    return (
+      <div key={upgrade.id} className="growth-stage">
+        <header>
+          <strong>{stageLabel}</strong>
+          <small>{built ? '已建成' : 'LV ' + upgrade.unlockLevel}</small>
+        </header>
+        <p>{upgrade.description}</p>
+        <div className="material-row">
+          {(Object.entries(upgrade.cost) as [ResourceId, number][]).map(([resource, amount]) => (
+            <span key={resource} className={state.inventory[resource] < amount ? 'is-missing' : ''}>
+              {RESOURCE_GLYPHS[resource]} {amount}
+            </span>
+          ))}
+        </div>
+        {!built && missing && <em>还缺：{missing}</em>}
+        <button type="button" disabled={disabled} onClick={() => startWholeBuild(upgrade.id)}>
+          {built ? '结构稳定' : affordable ? '开始敲击' : '继续打捞'}
+        </button>
+      </div>
+    );
+  };
+
   return (
     <div className="drawer-scroll build-list">
-      {UPGRADES.map((upgrade) => {
-        const built = state.raft.modules[upgrade.id];
-        const levelLocked = state.progress.level < upgrade.unlockLevel;
-        const dependencyLocked = Boolean(upgrade.requires && !state.raft.modules[upgrade.requires]);
-        const signalLocked = (upgrade.signalRequired ?? 0) > state.progress.signalFragments;
-        const affordable = canAfford(state, upgrade.cost);
-        const missing = (Object.entries(upgrade.cost) as [ResourceId, number][])
-          .filter(([resource, amount]) => state.inventory[resource] < amount)
-          .map(([resource, amount]) => RESOURCE_LABELS[resource] + ' ' + (amount - state.inventory[resource]))
-          .join(' · ');
-        const disabled = busy || built || levelLocked || dependencyLocked || signalLocked || !affordable;
-        return (
-          <article key={upgrade.id} className={'build-card ' + (built ? 'is-built' : '')}>
-            <div className="build-card__icon">
-              <span className={'module-icon module-icon--' + upgrade.id} />
-            </div>
-            <div className="build-card__body">
-              <header>
-                <span>{upgrade.eyebrow}</span>
-                <small>{built ? '已建成' : 'LV ' + upgrade.unlockLevel}</small>
-              </header>
-              <h3>{upgrade.name}</h3>
-              <p>{upgrade.description}</p>
-              <div className="material-row">
-                {(Object.entries(upgrade.cost) as [ResourceId, number][]).map(([resource, amount]) => (
-                  <span
-                    key={resource}
-                    className={state.inventory[resource] < amount ? 'is-missing' : ''}
-                  >
-                    {RESOURCE_GLYPHS[resource]} {amount}
-                  </span>
-                ))}
-              </div>
-              {!built && missing && <em>还缺：{missing}</em>}
-              <button type="button" disabled={disabled} onClick={() => build(upgrade.id)}>
-                {built ? '结构稳定' : affordable ? '开始敲击' : '继续打捞'}
-              </button>
-            </div>
-          </article>
-        );
-      })}
+      {deck && reinforced && (
+        <article className="build-card build-card--growth">
+          <div className="build-card__icon">
+            <span className="module-icon module-icon--deck" />
+          </div>
+          <div className="build-card__body">
+            <header><small>整体升级 · 无需选格</small></header>
+            <h3>甲板扩建</h3>
+            {renderStage(deck, '阶段一 · 2×2 → 3×3')}
+            {renderStage(reinforced, '阶段二 · 3×3 → 4×4 并加固')}
+          </div>
+        </article>
+      )}
+
+      {categories.map((category) => (
+        <section key={category} className="build-category">
+          <header><span>{BUILD_CATEGORY_LABELS[category]}</span></header>
+          {UPGRADES.filter((upgrade) => upgrade.category === category).map((upgrade) => {
+            const moduleId = upgrade.id as PlaceableModuleId;
+            const built = state.raft.modules[upgrade.id];
+            const levelLocked = state.progress.level < upgrade.unlockLevel;
+            const dependencyLocked = Boolean(upgrade.requires && !state.raft.modules[upgrade.requires]);
+            const signalLocked = (upgrade.signalRequired ?? 0) > state.progress.signalFragments;
+            const affordable = canAfford(state, upgrade.cost);
+            const missing = (Object.entries(upgrade.cost) as [ResourceId, number][])
+              .filter(([resource, amount]) => state.inventory[resource] < amount)
+              .map(([resource, amount]) => RESOURCE_LABELS[resource] + ' ' + (amount - state.inventory[resource]))
+              .join(' · ');
+            const disabled = busy || built || levelLocked || dependencyLocked || signalLocked || !affordable;
+            return (
+              <article key={upgrade.id} className={'build-card ' + (built ? 'is-built' : '')}>
+                <div className="build-card__icon">
+                  <span className={'module-icon module-icon--' + upgrade.id} />
+                </div>
+                <div className="build-card__body">
+                  <header>
+                    <small>{built ? '已建成' : 'LV ' + upgrade.unlockLevel}</small>
+                    <small>{upgrade.edgeSlot ? '边缘槽' : '占一格'}</small>
+                  </header>
+                  <h3>{upgrade.name}</h3>
+                  <p>{upgrade.description}</p>
+                  <div className="material-row">
+                    {(Object.entries(upgrade.cost) as [ResourceId, number][]).map(([resource, amount]) => (
+                      <span
+                        key={resource}
+                        className={state.inventory[resource] < amount ? 'is-missing' : ''}
+                      >
+                        {RESOURCE_GLYPHS[resource]} {amount}
+                      </span>
+                    ))}
+                  </div>
+                  {!built && missing && <em>还缺：{missing}</em>}
+                  {!built && (
+                    <button type="button" disabled={disabled} onClick={() => startPlaceBuild(moduleId)}>
+                      {affordable ? '选择位置' : '继续打捞'}
+                    </button>
+                  )}
+                </div>
+              </article>
+            );
+          })}
+        </section>
+      ))}
+
+      {builtPlaceables.length > 0 && (
+        <section className="build-category build-category--built">
+          <header><span>已建设施</span><small>搬动消耗材料 · 定位查看位置</small></header>
+          {builtPlaceables.map((upgrade) => {
+            const placed = Boolean(state.raft.placements[upgrade.id]);
+            const cost = ADVANCED_MOVE_LABEL[upgrade.id] ?? '木板 ×1';
+            return (
+              <article key={upgrade.id} className="built-facility">
+                <span className={'module-icon module-icon--' + upgrade.id} />
+                <strong>{upgrade.name}</strong>
+                <small>{placed ? '搬动 ' + cost : '等待摆放'}</small>
+                <div>
+                  <button type="button" onClick={() => locate(upgrade.id)}>定位</button>
+                  <button type="button" disabled={!placed || busy} onClick={() => startMove(upgrade.id)}>搬动</button>
+                </div>
+              </article>
+            );
+          })}
+        </section>
+      )}
     </div>
   );
 }
@@ -549,16 +737,65 @@ function TideAfterGame() {
   const [confirmRestart, setConfirmRestart] = useState(false);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [activeTab, setActiveTab] = useState<PanelTab>('build');
+  const [placement, setPlacement] = useState<PlacementIntent | null>(null);
+  const placementRef = useRef<PlacementIntent | null>(null);
   const guidance = useMemo(() => getPrimaryAction(state), [state]);
   const stormWarning = getStormWarningSeconds(state);
   const xpNeeded = getXpToNext(state.progress.level);
   const cloudConnected = cloudStatus === 'connected';
-  const selectEquipment = actions.selectEquipment;
+  const selectEquipment = visual.actions.switchGear;
   const nightThreat = state.world.day >= 2
     && (state.world.timeOfDay >= 0.7 || state.world.timeOfDay < 0.14);
 
   useEffect(() => {
+    placementRef.current = placement;
+  }, [placement]);
+
+  const cancelPlacement = useCallback(() => setPlacement(null), []);
+
+  const startPlaceBuild = useCallback((moduleId: PlaceableModuleId) => {
+    setDrawerOpen(false);
+    setPlacement({ mode: 'build', moduleId });
+  }, []);
+
+  const startWholeBuild = useCallback((moduleId: RaftModuleId) => {
+    return visual.actions.build(moduleId);
+  }, [visual.actions]);
+
+  const startMove = useCallback((moduleId: PlaceableModuleId) => {
+    const source = state.raft.placements[moduleId];
+    if (!source) return;
+    setDrawerOpen(false);
+    setPlacement({ mode: 'move', moduleId, source });
+  }, [state.raft.placements]);
+
+  const locateTimerRef = useRef<number | null>(null);
+  const locate = useCallback((moduleId: PlaceableModuleId) => {
+    setPlacement({ mode: 'locate', moduleId });
+    if (locateTimerRef.current !== null) window.clearTimeout(locateTimerRef.current);
+    locateTimerRef.current = window.setTimeout(() => {
+      setPlacement((current) => current?.mode === 'locate' ? null : current);
+    }, 2_600);
+  }, []);
+
+  const confirmPlacement = useCallback((target: ModulePlacement) => {
+    const intent = placementRef.current;
+    if (!intent || intent.mode === 'locate') return;
+    const worldPoint = getPlacementWorldPoint(state, target);
+    setPlacement(null);
+    if (intent.mode === 'build') {
+      visual.actions.build(intent.moduleId, target, worldPoint);
+    } else {
+      visual.actions.relocate(intent.moduleId, target, worldPoint);
+    }
+  }, [state, visual.actions]);
+
+  useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape' && placementRef.current) {
+        setPlacement(null);
+        return;
+      }
       const target = event.target as HTMLElement | null;
       if (target?.closest('button, input, textarea, select')) return;
       const key = event.key.toLowerCase();
@@ -648,6 +885,14 @@ function TideAfterGame() {
           visualRef={visual.visualRef}
           movementIntentRef={movementIntentRef}
           effectsRef={visual.effectsRef}
+          placementRef={placementRef}
+          onPlacementHover={(hover) => {
+            setPlacement((current) => current && current.mode !== 'locate' && current.hover !== hover
+              ? { ...current, hover: hover ?? undefined }
+              : current);
+          }}
+          onPlacementConfirm={confirmPlacement}
+          onPlacementCancel={cancelPlacement}
           onSceneAction={(sceneAction) => {
             if (sceneAction.kind === 'collect') {
               visual.actions.collect(sceneAction.debrisId);
@@ -667,7 +912,7 @@ function TideAfterGame() {
 
         <header className="brand-chip">
           <span>潮</span>
-          <div><small>AFTER THE TIDELINE</small><strong>潮线之后</strong></div>
+          <div><small>漂流生存</small><strong>潮线之后</strong></div>
         </header>
 
         <section className="survival-cluster" aria-label="生存状态">
@@ -732,6 +977,15 @@ function TideAfterGame() {
           ))}
         </div>
 
+        {placement && placement.mode !== 'locate' && (
+          <div className="placement-toolbar">
+            <strong>{placement.mode === 'build' ? '选择建造位置' : '选择搬动位置'}</strong>
+            <span>{UPGRADES.find((upgrade) => upgrade.id === placement.moduleId)?.name}</span>
+            <small>青绿 = 可放置 · 红色 = 不可 · 需在人物两格内</small>
+            <button type="button" onClick={cancelPlacement}>取消 · Esc</button>
+          </div>
+        )}
+
         {state.progress.combo >= 2 && (
           <div className="combo-token"><small>连捞</small><strong>×{state.progress.combo}</strong></div>
         )}
@@ -752,7 +1006,7 @@ function TideAfterGame() {
         <aside className={'control-drawer ' + (drawerOpen ? 'is-open' : '')}>
           <header className="control-drawer__header">
             <div>
-              <small>RAFT WORK DESK</small>
+              <small>木筏工作台</small>
               <h2>{PANEL_TABS.find((tab) => tab.id === activeTab)?.label}</h2>
             </div>
             <span>{state.raft.size}×{state.raft.size}</span>
@@ -771,7 +1025,14 @@ function TideAfterGame() {
             ))}
           </nav>
           {activeTab === 'build' && (
-            <BuildPanel state={state} build={visual.actions.build} busy={visual.busy} />
+            <BuildPanel
+              state={state}
+              startWholeBuild={startWholeBuild}
+              startPlaceBuild={startPlaceBuild}
+              startMove={startMove}
+              locate={locate}
+              busy={visual.busy}
+            />
           )}
           {activeTab === 'research' && (
             <ResearchPanel state={state} research={actions.research} />
@@ -838,7 +1099,7 @@ function TideAfterGame() {
               onClick={contextAction}
             >
               <span>{contextLabel}</span>
-              <small>{visual.busy ? '动作中' : 'ACTION'}</small>
+              <small>{visual.busy ? '动作中' : '执行'}</small>
             </button>
             <button type="button" className="action-wheel__secondary" onClick={() => selectEquipment('fishingRod')}>竿</button>
           </div>
@@ -888,7 +1149,7 @@ function TideAfterGame() {
         {state.gameOver && (
           <div className="full-overlay">
             <section className="ending-card">
-              <small>THE SEA REMEMBERS</small>
+              <small>大海记得</small>
               <h2>漂流中止</h2>
               <p>你坚持到第 {state.world.day} 天，完成 {state.progress.stats.collected} 次打捞，最高连捞记录留在这片海上。</p>
               <div className="ending-stats">
@@ -906,7 +1167,7 @@ function TideAfterGame() {
         <div className="full-overlay intro-overlay">
           <section className="intro-card">
             <div className="intro-copy">
-              <small>YEAR 07 · SEA LEVEL +68M</small>
+              <small>第七年 · 海平面 +68 米</small>
               <h1>潮线之后</h1>
               <h2>最后一块木筏，<br />和一个还没放弃的人。</h2>
               <p>打捞海上残骸，钓鱼维生，把 2×2 木筏建成能穿越风暴的家。首局只追踪一个当前目标，让每一步都清楚可见。</p>
@@ -924,7 +1185,7 @@ function TideAfterGame() {
             </div>
             <div className="diver-portrait">
               <img src="/assets/tide-original/fisherman-portrait.png" alt="原创落魄渔夫大叔角色" />
-              <span>TIDE FISHERMAN · 07</span>
+              <span>潮线渔夫 · 07</span>
             </div>
           </section>
         </div>
@@ -933,7 +1194,7 @@ function TideAfterGame() {
       {confirmRestart && (
         <div className="full-overlay confirm-overlay">
           <section className="confirm-card" role="dialog" aria-modal="true">
-            <small>RESET RUN</small>
+            <small>重开漂流</small>
             <h2>放弃这次漂流？</h2>
             <p>游客身份会保留；木筏、背包、等级和本局天数会重置，并生成新的 runId。</p>
             <div>

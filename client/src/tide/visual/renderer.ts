@@ -1,11 +1,28 @@
-import { COMBAT, WORLD } from '../config';
-import { getNearestCollectableId } from '../game';
-import type { DebrisItem, EnemyState, RaftModuleId, TideGameState } from '../types';
+import { COMBAT, PLACEMENT, WORLD } from '../config';
+import {
+  getFacilityWorldPoint,
+  getNearestCollectableId,
+  getNetCollectOrigin,
+  getPlacementWorldPoint,
+  isEdgePlacement,
+  validatePlacement,
+} from '../game';
+import type {
+  DebrisItem,
+  EnemyState,
+  EquipmentId,
+  ModulePlacement,
+  PlaceableModuleId,
+  PlacementIntent,
+  RaftModuleId,
+  TideGameState,
+} from '../types';
 import { getActionProgress } from './animation';
 import {
   interpolatePosition,
   projectWorldPoint,
   projectWorldVector,
+  projectedDistance,
 } from './projection';
 import type {
   LoadedTideAssets,
@@ -46,8 +63,6 @@ export const createTideRendererMemory = (state: TideGameState): TideRendererMemo
   emitted: new Set(),
   nextParticleId: 1,
 });
-
-const waveColor = (alpha: number) => 'rgba(186, 244, 236, ' + alpha.toFixed(3) + ')';
 
 const roundedRect = (
   context: CanvasRenderingContext2D,
@@ -101,31 +116,65 @@ const drawOcean = (
   }
   context.restore();
 
-  const waveCount = storm ? 58 : cloudy ? 43 : 36;
+  // 海面主线减少到 2–3 层，去掉杂乱青色细线，改用白色浪花承担可读性。
+  const waveCount = storm ? 30 : cloudy ? 22 : 16;
   for (let index = 0; index < waveCount; index += 1) {
     const lane = (index * 83 + state.world.seed * 0.013) % (WORLD.height + 100) - 50;
     const speed = (index % 2 ? 18 : -12) * (storm ? 1.55 : 1);
     const x = ((index * 149 + seconds * speed) % (WORLD.width + 260) + WORLD.width + 260) % (WORLD.width + 260) - 130;
     const y = lane + Math.sin(seconds * (0.42 + index % 5 * 0.07) + index * 1.73) * (9 + index % 4 * 4);
     const length = 32 + (index * 29) % 92;
-    const crest = sampleWaterSurface(x, y, now, state.world.weather).foam;
-    context.strokeStyle = waveColor(0.055 + crest * (storm ? 0.3 : 0.18));
-    context.lineWidth = crest > 0.58 ? 3 : 1.4 + index % 3 * 0.45;
+    context.strokeStyle = `rgba(198, 238, 234, ${storm ? 0.16 : 0.1})`;
+    context.lineWidth = 1.6;
     context.beginPath();
     context.moveTo(x, y + 3);
-    context.bezierCurveTo(
-      x + length * 0.18,
-      y - 7 - index % 5,
-      x + length * 0.48,
-      y - 4 + index % 3,
-      x + length * 0.66,
-      y,
-    );
-    context.quadraticCurveTo(x + length * 0.84, y + 7, x + length, y + 2);
+    context.quadraticCurveTo(x + length * 0.5, y - 5, x + length, y + 2);
     context.stroke();
-    if (crest > 0.62) {
-      context.fillStyle = `rgba(207, 247, 239, ${0.11 + crest * 0.18})`;
-      context.fillRect(Math.round(x + length * 0.28), Math.round(y - 4), 4 + index % 8, 2);
+  }
+
+  // 白色破浪：浪尖形成 → 横向展开 → 破碎成数段白沫 → 逐渐消失。
+  const breakerCount = storm ? 16 : cloudy ? 11 : 7;
+  const breakerWidth = storm ? 150 : cloudy ? 110 : 86;
+  for (let index = 0; index < breakerCount; index += 1) {
+    const cycle = storm ? 3.4 : cloudy ? 4.4 : 5.4;
+    const phase = ((seconds / cycle) + index * 0.618) % 1;
+    const lane = (index * 131 + state.world.seed * 0.017) % (WORLD.height - 60) + 30;
+    const x = ((index * 211 - seconds * (storm ? 26 : 14)) % (WORLD.width + 200) + WORLD.width + 200) % (WORLD.width + 200) - 100;
+    const y = lane + Math.sin(seconds * 0.5 + index) * 8;
+    let spread: number;
+    let alpha: number;
+    if (phase < 0.22) {
+      spread = 0.18 + (phase / 0.22) * 0.3;
+      alpha = 0.5 + (phase / 0.22) * 0.4;
+    } else if (phase < 0.58) {
+      spread = 0.48 + ((phase - 0.22) / 0.36) * 0.52;
+      alpha = 0.9;
+    } else if (phase < 0.84) {
+      spread = 1;
+      alpha = 0.9 - ((phase - 0.58) / 0.26) * 0.45;
+    } else {
+      spread = 1;
+      alpha = 0.45 * (1 - (phase - 0.84) / 0.16);
+    }
+    const half = breakerWidth * spread / 2;
+    context.strokeStyle = `rgba(240, 252, 250, ${alpha.toFixed(3)})`;
+    context.lineWidth = phase < 0.22 ? 3 : phase < 0.58 ? 2.6 : 2.2;
+    context.beginPath();
+    if (phase < 0.58) {
+      context.moveTo(x - half, y + 4);
+      context.quadraticCurveTo(x, y - 6 - (1 - spread) * 6, x + half, y + 4);
+      context.stroke();
+    } else {
+      // 破碎阶段：拆成数段独立白沫。
+      const segments = 4;
+      for (let segment = 0; segment < segments; segment += 1) {
+        const segX = x - half + (segment + 0.5) * (breakerWidth * spread / segments);
+        const segLen = half / segments * 0.72;
+        const wob = Math.sin(seconds * 3 + segment * 1.9 + index) * 3;
+        context.moveTo(segX - segLen, y + 3 + wob * 0.4);
+        context.quadraticCurveTo(segX, y - 3 + wob, segX + segLen, y + 3 - wob * 0.3);
+      }
+      context.stroke();
     }
   }
 
@@ -163,6 +212,7 @@ const drawDebris = (
   assets: LoadedTideAssets,
   now: number,
   highlighted: boolean,
+  netOrigin: { x: number; y: number } | null,
 ) => {
   const seconds = now / 1000;
   const projected = projectWorldPoint(item);
@@ -170,9 +220,11 @@ const drawDebris = (
   const speed = Math.hypot(velocity.x, velocity.y) || 1;
   const profile = DEBRIS_WATER_PROFILES[item.type];
   const water = sampleWaterSurface(item.x, item.y, now, state.world.weather);
-  const bob = water.height * profile.bobStrength - profile.submerge;
+  const bob = water.height * profile.bobStrength - profile.submerge * 0.4;
   const angle = water.slopeX * profile.rollStrength
     + Math.sin(seconds * 0.75 + item.y * 0.019) * 0.045 * profile.rollStrength;
+  const withinNet = netOrigin !== null
+    && projectedDistance(item, netOrigin) <= PLACEMENT.netCollectRadius;
   context.save();
   context.translate(Math.round(projected.x), Math.round(projected.y + bob));
   context.strokeStyle = `rgba(190, 239, 231, ${0.13 + profile.wakeStrength * 0.13})`;
@@ -187,10 +239,6 @@ const drawDebris = (
   );
   context.stroke();
   context.rotate(angle);
-  context.fillStyle = 'rgba(1, 24, 31, 0.22)';
-  context.beginPath();
-  context.ellipse(2, profile.submerge + 3, profile.displaySize * 0.36, 4.5, 0, 0, Math.PI * 2);
-  context.fill();
   if (highlighted) {
     context.strokeStyle = 'rgba(248, 218, 112, 0.78)';
     context.lineWidth = 2;
@@ -200,101 +248,122 @@ const drawDebris = (
     context.stroke();
     context.setLineDash([]);
   }
-
-  if (assets.combat) {
-    const columns: Record<DebrisItem['type'], number> = {
-      wood: 0,
-      plastic: 1,
-      scrap: 2,
-      fiber: 3,
-      crate: 4,
-    };
-    const size = profile.displaySize;
-    context.drawImage(
-      assets.combat,
-      columns[item.type] * 128,
-      128,
-      128,
-      128,
-      -size / 2,
-      -size * 0.72,
-      size,
-      size,
-    );
-  } else if (item.type === 'wood') {
-    context.fillStyle = '#573827';
-    roundedRect(context, -19, -7, 38, 14, 5);
-    context.fill();
-    context.fillStyle = '#a76c3f';
-    roundedRect(context, -17, -8, 34, 12, 4);
-    context.fill();
-    context.strokeStyle = '#d09a59';
-    context.lineWidth = 2;
+  if (withinNet) {
+    context.strokeStyle = 'rgba(126, 200, 236, 0.7)';
+    context.lineWidth = 1.6;
     context.beginPath();
-    context.moveTo(-13, -3);
-    context.lineTo(11, -3);
+    context.ellipse(0, 0, 21, 16, 0, 0, Math.PI * 2);
     context.stroke();
-    context.fillStyle = '#332c28';
-    context.fillRect(-5, -8, 3, 12);
-  } else if (item.type === 'plastic') {
-    context.fillStyle = '#7cc5c7';
-    roundedRect(context, -8, -13, 16, 25, 5);
-    context.fill();
-    context.fillStyle = '#d3f1e9';
-    roundedRect(context, -5, -10, 8, 14, 3);
-    context.fill();
-    context.fillStyle = '#326b78';
-    context.fillRect(-5, -16, 10, 5);
-  } else if (item.type === 'fiber') {
-    context.strokeStyle = '#ccb477';
-    context.lineWidth = 4;
-    for (let index = -9; index <= 9; index += 6) {
-      context.beginPath();
-      context.moveTo(index, -11);
-      context.quadraticCurveTo(index + 10, 0, index + 5, 11);
-      context.stroke();
-    }
-  } else if (item.type === 'crate') {
-    context.fillStyle = '#4b2c20';
-    roundedRect(context, -18, -16, 36, 32, 4);
-    context.fill();
-    context.fillStyle = '#a76636';
-    roundedRect(context, -15, -14, 30, 27, 3);
-    context.fill();
-    context.strokeStyle = '#d59b52';
-    context.lineWidth = 3;
-    context.beginPath();
-    context.moveTo(-12, -10);
-    context.lineTo(12, 9);
-    context.moveTo(12, -10);
-    context.lineTo(-12, 9);
-    context.stroke();
-    context.fillStyle = '#e1c367';
-    context.fillRect(-3, -3, 6, 7);
-  } else {
-    context.fillStyle = '#58666b';
-    context.beginPath();
-    context.moveTo(-13, -10);
-    context.lineTo(11, -13);
-    context.lineTo(16, 7);
-    context.lineTo(-8, 13);
-    context.closePath();
-    context.fill();
-    context.fillStyle = '#a9aaa0';
-    context.fillRect(-8, -6, 15, 4);
-    context.fillStyle = '#c6633e';
-    context.fillRect(8, -10, 5, 16);
   }
 
-  context.fillStyle = state.world.weather === 'storm'
-    ? 'rgba(22, 75, 88, 0.44)'
-    : 'rgba(20, 130, 143, 0.33)';
-  context.fillRect(-profile.displaySize * 0.46, 1, profile.displaySize * 0.92, profile.submerge + 9);
-  context.strokeStyle = `rgba(211, 248, 239, ${0.34 + water.foam * 0.42})`;
-  context.lineWidth = 1.5;
+  const drawDebrisSprite = () => {
+    if (assets.combat) {
+      const columns: Record<DebrisItem['type'], number> = {
+        wood: 0,
+        plastic: 1,
+        scrap: 2,
+        fiber: 3,
+        crate: 4,
+      };
+      const size = profile.displaySize;
+      context.drawImage(
+        assets.combat,
+        columns[item.type] * 128,
+        128,
+        128,
+        128,
+        -size / 2,
+        -size * 0.72,
+        size,
+        size,
+      );
+    } else if (item.type === 'wood') {
+      context.fillStyle = '#573827';
+      roundedRect(context, -19, -7, 38, 14, 5);
+      context.fill();
+      context.fillStyle = '#a76c3f';
+      roundedRect(context, -17, -8, 34, 12, 4);
+      context.fill();
+      context.strokeStyle = '#d09a59';
+      context.lineWidth = 2;
+      context.beginPath();
+      context.moveTo(-13, -3);
+      context.lineTo(11, -3);
+      context.stroke();
+      context.fillStyle = '#332c28';
+      context.fillRect(-5, -8, 3, 12);
+    } else if (item.type === 'plastic') {
+      context.fillStyle = '#7cc5c7';
+      roundedRect(context, -8, -13, 16, 25, 5);
+      context.fill();
+      context.fillStyle = '#d3f1e9';
+      roundedRect(context, -5, -10, 8, 14, 3);
+      context.fill();
+      context.fillStyle = '#326b78';
+      context.fillRect(-5, -16, 10, 5);
+    } else if (item.type === 'fiber') {
+      context.strokeStyle = '#ccb477';
+      context.lineWidth = 4;
+      for (let index = -9; index <= 9; index += 6) {
+        context.beginPath();
+        context.moveTo(index, -11);
+        context.quadraticCurveTo(index + 10, 0, index + 5, 11);
+        context.stroke();
+      }
+    } else if (item.type === 'crate') {
+      context.fillStyle = '#4b2c20';
+      roundedRect(context, -18, -16, 36, 32, 4);
+      context.fill();
+      context.fillStyle = '#a76636';
+      roundedRect(context, -15, -14, 30, 27, 3);
+      context.fill();
+      context.strokeStyle = '#d59b52';
+      context.lineWidth = 3;
+      context.beginPath();
+      context.moveTo(-12, -10);
+      context.lineTo(12, 9);
+      context.moveTo(12, -10);
+      context.lineTo(-12, 9);
+      context.stroke();
+      context.fillStyle = '#e1c367';
+      context.fillRect(-3, -3, 6, 7);
+    } else {
+      context.fillStyle = '#58666b';
+      context.beginPath();
+      context.moveTo(-13, -10);
+      context.lineTo(11, -13);
+      context.lineTo(16, 7);
+      context.lineTo(-8, 13);
+      context.closePath();
+      context.fill();
+      context.fillStyle = '#a9aaa0';
+      context.fillRect(-8, -6, 15, 4);
+      context.fillStyle = '#c6633e';
+      context.fillRect(8, -10, 5, 16);
+    }
+  };
+
+  // 真正裁切：水下约 35%–55% 被水面遮挡，只保留非常淡的水下轮廓。
+  const size = profile.displaySize;
+  const spriteTop = -size * 0.72;
+  const waterY = spriteTop + size * (1 - profile.hiddenFraction);
+  context.save();
+  context.globalAlpha = 0.13;
+  drawDebrisSprite();
+  context.restore();
+  context.save();
   context.beginPath();
-  context.moveTo(-profile.displaySize * 0.38, 1);
-  context.quadraticCurveTo(0, -2 - water.foam * 2, profile.displaySize * 0.38, 1);
+  context.rect(-size, spriteTop - 4, size * 2, waterY - spriteTop + 4);
+  context.clip();
+  drawDebrisSprite();
+  context.restore();
+
+  // 水线经过物体时的白色短泡沫和少量气泡。
+  context.strokeStyle = `rgba(240, 252, 250, ${0.5 + water.foam * 0.4})`;
+  context.lineWidth = 2;
+  context.beginPath();
+  context.moveTo(-profile.displaySize * 0.4, waterY + 1);
+  context.quadraticCurveTo(0, waterY - 2 - water.foam * 2, profile.displaySize * 0.4, waterY + 1);
   context.stroke();
   const bubbleWindow = ((seconds + item.x * 0.031 + item.y * 0.017) * profile.bubbleRate) % 5;
   if (bubbleWindow < 0.75) {
@@ -302,7 +371,7 @@ const drawDebris = (
     context.lineWidth = 1;
     for (let index = 0; index < 3; index += 1) {
       context.beginPath();
-      context.arc(-12 + index * 8, 7 + Math.sin(seconds * 2 + index) * 3, 1.5 + index * 0.7, 0, Math.PI * 2);
+      context.arc(-12 + index * 8, waterY + 5 + Math.sin(seconds * 2 + index) * 3, 1.5 + index * 0.7, 0, Math.PI * 2);
       context.stroke();
     }
   }
@@ -478,31 +547,24 @@ const drawRaftBase = (
   return { startX, startY, width: size * tile, half, bob };
 };
 
-const drawNet = (
+/** 收集网的蓝色等距范围圈。 */
+const drawNetRange = (
   context: CanvasRenderingContext2D,
   x: number,
   y: number,
-  width: number,
-  bob: number,
+  strong: boolean,
 ) => {
-  const start = projectWorldPoint({ x: x + 8, y });
-  const end = projectWorldPoint({ x: x + width - 8, y });
-  start.y += bob + 4;
-  end.y += bob + 4;
   context.save();
-  context.strokeStyle = '#d7bf82';
-  context.lineWidth = 2;
+  context.strokeStyle = strong ? 'rgba(112, 196, 236, 0.75)' : 'rgba(112, 196, 236, 0.18)';
+  context.lineWidth = strong ? 2.2 : 1.4;
+  context.setLineDash(strong ? [8, 6] : []);
   context.beginPath();
-  context.moveTo(start.x, start.y);
-  context.quadraticCurveTo((start.x + end.x) / 2, (start.y + end.y) / 2 + 25, end.x, end.y);
+  context.ellipse(x, y, PLACEMENT.netCollectRadius, PLACEMENT.netCollectRadius * 0.62, 0, 0, Math.PI * 2);
   context.stroke();
-  for (let progress = 0.14; progress < 0.9; progress += 0.16) {
-    const px = start.x + (end.x - start.x) * progress;
-    const py = start.y + (end.y - start.y) * progress;
-    context.beginPath();
-    context.moveTo(px, py + 2);
-    context.lineTo(px + 8, py + 21);
-    context.stroke();
+  context.setLineDash([]);
+  if (strong) {
+    context.fillStyle = 'rgba(96, 178, 226, 0.06)';
+    context.fill();
   }
   context.restore();
 };
@@ -615,6 +677,30 @@ const drawFacility = (
   context.ellipse(3, 8, 27, 9, 0, 0, Math.PI * 2);
   context.fill();
 
+  if (moduleId === 'net') {
+    context.strokeStyle = '#d7bf82';
+    context.lineWidth = 2.4;
+    context.beginPath();
+    context.ellipse(0, -6, 24, 12, 0, 0, Math.PI * 2);
+    context.stroke();
+    context.strokeStyle = 'rgba(215, 191, 130, 0.7)';
+    context.lineWidth = 1.2;
+    for (let ring = 1; ring <= 3; ring += 1) {
+      context.beginPath();
+      context.ellipse(0, -6 - ring * 6, 24 - ring * 5, 12 - ring * 2.6, 0, 0, Math.PI * 2);
+      context.stroke();
+    }
+    context.strokeStyle = '#8d292b';
+    context.lineWidth = 2;
+    context.beginPath();
+    context.moveTo(-24, -6);
+    context.lineTo(-30, -14);
+    context.moveTo(24, -6);
+    context.lineTo(30, -14);
+    context.stroke();
+    context.restore();
+    return;
+  }
   if (moduleId === 'purifier') {
     context.fillStyle = '#263f45';
     roundedRect(context, -21, -24, 42, 33, 7);
@@ -758,36 +844,29 @@ const drawFacility = (
   context.restore();
 };
 
+const PLACEABLE_MODULE_IDS: PlaceableModuleId[] = [
+  'net', 'purifier', 'grill', 'storage', 'workshop', 'sail', 'garden', 'radio', 'beacon',
+];
+
 const facilityEntities = (
   context: CanvasRenderingContext2D,
   state: TideGameState,
-  bounds: { startX: number; startY: number; width: number; bob: number },
+  bounds: { bob: number },
   now: number,
 ) => {
-  const { startX, startY, width } = bounds;
-  const placements: Partial<Record<RaftModuleId, [number, number]>> = {
-    purifier: [startX + 36, startY + 54],
-    grill: [startX + width - 40, startY + 55],
-    storage: [startX + 43, startY + width - 25],
-    workshop: [startX + width * 0.5, startY + width * 0.55],
-    garden: [startX + width - 43, startY + width - 24],
-    sail: [startX + width * 0.73, startY + width * 0.54],
-    radio: [startX + 37, startY + width * 0.52],
-    beacon: [startX + width * 0.5, startY + 32],
-  };
   const entities: SceneEntity[] = [];
-  (Object.keys(placements) as RaftModuleId[]).forEach((moduleId) => {
-    if (!state.raft.modules[moduleId]) return;
-    const position = placements[moduleId];
-    if (!position) return;
-    const projected = projectWorldPoint({ x: position[0], y: position[1] });
+  for (const moduleId of PLACEABLE_MODULE_IDS) {
+    if (!state.raft.modules[moduleId]) continue;
+    const position = getFacilityWorldPoint(state, moduleId);
+    if (!position) continue;
+    const projected = projectWorldPoint(position);
     projected.y += bounds.bob;
     entities.push({
       id: moduleId,
-      depth: projected.y + (moduleId === 'sail' ? 4 : 0),
+      depth: moduleId === 'net' ? projected.y - 40 : projected.y + (moduleId === 'sail' ? 4 : 0),
       draw: () => drawFacility(context, moduleId, projected.x, projected.y, now),
     });
-  });
+  }
   return entities;
 };
 
@@ -815,6 +894,59 @@ const drawFallbackDiver = (context: CanvasRenderingContext2D) => {
   context.fillStyle = '#4d362a';
   context.fillRect(-15, 19, 12, 13);
   context.fillRect(3, 19, 12, 13);
+};
+
+/** 八方向手部锚点：behind 为 true 时工具画在身体后方（朝北一侧）。 */
+const HAND_ANCHORS: Record<VisualDirection, { x: number; y: number; behind: boolean; flip: boolean }> = {
+  south: { x: 15, y: -8, behind: false, flip: false },
+  southWest: { x: -15, y: -8, behind: false, flip: true },
+  west: { x: -17, y: -10, behind: false, flip: true },
+  northWest: { x: -13, y: -12, behind: true, flip: true },
+  north: { x: 2, y: -16, behind: true, flip: false },
+  northEast: { x: 13, y: -12, behind: true, flip: false },
+  east: { x: 17, y: -10, behind: false, flip: false },
+  southEast: { x: 15, y: -8, behind: false, flip: false },
+};
+
+/** 简洁像素工具：24×24 风格，直接以色块绘制，始终握在手中。 */
+const drawHeldTool = (
+  context: CanvasRenderingContext2D,
+  equipment: EquipmentId,
+  anchor: { x: number; y: number; flip: boolean },
+  lift: number,
+) => {
+  context.save();
+  context.translate(anchor.x, anchor.y - lift);
+  if (anchor.flip) context.scale(-1, 1);
+  if (equipment === 'cutlass') {
+    context.fillStyle = '#4a3323';
+    context.fillRect(-2, -1, 5, 9);
+    context.fillStyle = '#d8c489';
+    context.fillRect(-1, -18, 3, 18);
+    context.fillStyle = '#f2e4b0';
+    context.fillRect(1, -18, 3, 15);
+  } else if (equipment === 'salvageTool') {
+    context.fillStyle = '#5d3f28';
+    context.fillRect(-2, -14, 4, 22);
+    context.fillStyle = '#9aa5a1';
+    context.fillRect(-8, -18, 14, 6);
+    context.fillStyle = '#c2ccc6';
+    context.fillRect(-8, -18, 14, 2);
+  } else {
+    context.strokeStyle = '#6b4a2f';
+    context.lineWidth = 3;
+    context.beginPath();
+    context.moveTo(-2, 8);
+    context.lineTo(10, -20);
+    context.stroke();
+    context.strokeStyle = '#d9e2d6';
+    context.lineWidth = 1;
+    context.beginPath();
+    context.moveTo(10, -20);
+    context.quadraticCurveTo(15, -8, 13, 2);
+    context.stroke();
+  }
+  context.restore();
 };
 
 const actionTarget = (visual: PlayerVisualState, x: number, y: number) => {
@@ -922,6 +1054,7 @@ const drawDiver = (
   assets: LoadedTideAssets,
   now: number,
   walking: boolean,
+  equipment: EquipmentId,
 ) => {
   const actionProgress = getActionProgress(visual, now);
   const walkPhase = now / 105;
@@ -945,6 +1078,15 @@ const drawDiver = (
   context.fill();
   context.rotate(actionLean);
 
+  // 当前装备始终握在手中；切换装备时播放短促抬手。
+  const anchor = HAND_ANCHORS[direction];
+  const toolLift = visual.action === 'switch' ? Math.sin(actionProgress * Math.PI) * 12 : 0;
+  const showHeldTool = visual.action === 'idle' || visual.action === 'walk'
+    || visual.action === 'switch' || visual.action === 'hookCast' || visual.action === 'hookPull';
+  if (showHeldTool && anchor.behind) {
+    drawHeldTool(context, equipment, anchor, toolLift);
+  }
+
   if (assets.character) {
     const sourceColumn = walking
       ? 2 + Math.floor(now / 83) % 6
@@ -959,6 +1101,9 @@ const drawDiver = (
     context.restore();
   } else {
     drawFallbackDiver(context);
+  }
+  if (showHeldTool && !anchor.behind) {
+    drawHeldTool(context, equipment, anchor, toolLift);
   }
   if (visual.action === 'build') {
     const hitPhase = (actionProgress * 3) % 1;
@@ -1000,6 +1145,91 @@ const drawDiver = (
     context.fillRect(-35, -42, 70, 76);
   }
   context.restore();
+};
+
+const isSamePlacement = (a: ModulePlacement | undefined, b: ModulePlacement) => {
+  if (!a) return false;
+  if (a.kind === 'tile' && b.kind === 'tile') return a.gridX === b.gridX && a.gridY === b.gridY;
+  if (a.kind === 'edge' && b.kind === 'edge') return a.side === b.side && a.index === b.index;
+  return false;
+};
+
+/** 摆放模式：合法格青绿、非法格红色，悬停显示半透明设施轮廓与收集网范围。 */
+const drawPlacementOverlay = (
+  context: CanvasRenderingContext2D,
+  state: TideGameState,
+  intent: PlacementIntent,
+  now: number,
+) => {
+  const tile = WORLD.tileSize;
+  if (intent.mode === 'locate') {
+    const position = getFacilityWorldPoint(state, intent.moduleId);
+    if (position) {
+      const projected = projectWorldPoint(position);
+      const pulse = 0.5 + Math.sin(now / 160) * 0.5;
+      context.save();
+      context.strokeStyle = `rgba(248, 218, 112, ${0.5 + pulse * 0.45})`;
+      context.lineWidth = 2.6;
+      context.setLineDash([10, 7]);
+      context.beginPath();
+      context.ellipse(projected.x, projected.y - 8, 42 + pulse * 8, 26 + pulse * 5, 0, 0, Math.PI * 2);
+      context.stroke();
+      context.setLineDash([]);
+      context.restore();
+    }
+    return;
+  }
+  const isEdgeModule = isEdgePlacement(intent.moduleId);
+  const candidates: ModulePlacement[] = [];
+  if (isEdgeModule) {
+    for (const side of ['north', 'east', 'south', 'west'] as const) {
+      for (let index = 0; index < state.raft.size; index += 1) {
+        candidates.push({ kind: 'edge', side, index });
+      }
+    }
+  } else {
+    for (let y = 0; y < state.raft.size; y += 1) {
+      for (let x = 0; x < state.raft.size; x += 1) {
+        candidates.push({ kind: 'tile', gridX: x, gridY: y });
+      }
+    }
+  }
+
+  const pulse = 0.6 + Math.sin(now / 240) * 0.16;
+  candidates.forEach((candidate) => {
+    const check = validatePlacement(state, intent.moduleId, candidate);
+    const valid = check.ok;
+    const hovered = isSamePlacement(intent.hover, candidate);
+    if (!valid && !hovered) return;
+    const center = getPlacementWorldPoint(state, candidate);
+    const projected = projectWorldPoint(center);
+    const pad = isEdgeModule ? tile * 0.24 : tile * 0.5;
+    diamondPath(context, [
+      { x: projected.x, y: projected.y - pad * 0.62 },
+      { x: projected.x + pad, y: projected.y },
+      { x: projected.x, y: projected.y + pad * 0.62 },
+      { x: projected.x - pad, y: projected.y },
+    ]);
+    context.fillStyle = valid
+      ? `rgba(94, 210, 180, ${hovered ? 0.42 : 0.16 * pulse + 0.08})`
+      : 'rgba(226, 92, 78, 0.4)';
+    context.fill();
+    context.strokeStyle = valid
+      ? `rgba(126, 232, 198, ${hovered ? 0.95 : 0.55})`
+      : 'rgba(240, 128, 112, 0.85)';
+    context.lineWidth = hovered ? 2.4 : 1.4;
+    context.stroke();
+
+    if (hovered) {
+      if (intent.moduleId === 'net') {
+        drawNetRange(context, projected.x, projected.y, true);
+      }
+      context.save();
+      context.globalAlpha = valid ? 0.6 : 0.4;
+      drawFacility(context, intent.moduleId, projected.x, projected.y, now);
+      context.restore();
+    }
+  });
 };
 
 const particlePalette = {
@@ -1209,6 +1439,7 @@ export const renderTideScene = (
   assets: LoadedTideAssets,
   effects: VisualEffect[],
   movementIntent: MovementIntent,
+  placementIntent: PlacementIntent | null,
   now: number,
   memory: TideRendererMemory,
 ) => {
@@ -1216,18 +1447,20 @@ export const renderTideScene = (
   drawOcean(context, state, now);
 
   const nearestId = getNearestCollectableId(state);
+  const netOrigin = getNetCollectOrigin(state);
   const backDebris = state.debris.filter((item) => projectWorldPoint(item).y <= WORLD.centerY + 8);
   const frontDebris = state.debris.filter((item) => projectWorldPoint(item).y > WORLD.centerY + 8);
-  backDebris.forEach((item) => drawDebris(context, item, state, assets, now, item.id === nearestId));
+  backDebris.forEach((item) => drawDebris(context, item, state, assets, now, item.id === nearestId, netOrigin));
   state.enemies
     .filter((enemy) => enemy.phase === 'swimming' && projectWorldPoint(enemy).y <= WORLD.centerY + 8)
     .forEach((enemy) => drawEnemy(context, enemy, state, assets, now, 0));
 
   const bounds = drawRaftBase(context, state, assets, now);
-  if (state.raft.modules.net) {
-    drawNet(context, bounds.startX, bounds.startY + bounds.width + 6, bounds.width, bounds.bob);
+  if (netOrigin) {
+    const netProjected = projectWorldPoint(netOrigin);
+    drawNetRange(context, netProjected.x, netProjected.y, false);
   }
-  frontDebris.forEach((item) => drawDebris(context, item, state, assets, now, item.id === nearestId));
+  frontDebris.forEach((item) => drawDebris(context, item, state, assets, now, item.id === nearestId, netOrigin));
   state.enemies
     .filter((enemy) => enemy.phase === 'swimming' && projectWorldPoint(enemy).y > WORLD.centerY + 8)
     .forEach((enemy) => drawEnemy(context, enemy, state, assets, now, 0));
@@ -1279,10 +1512,15 @@ export const renderTideScene = (
       assets,
       now,
       walking,
+      state.equipment.selected,
     ),
   });
   entities.sort((a, b) => a.depth - b.depth || a.id.localeCompare(b.id));
   entities.forEach((entity) => entity.draw());
+
+  if (placementIntent) {
+    drawPlacementOverlay(context, state, placementIntent, now);
+  }
 
   syncActionParticles(memory, visual, state, now);
   syncExternalEffects(memory, effects, now);

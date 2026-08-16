@@ -1,6 +1,8 @@
 import type {
+  BuildCategory,
   Inventory,
   PerkId,
+  PlaceableModuleId,
   RaftModuleId,
   ResourceId,
   RouteMode,
@@ -16,7 +18,21 @@ export const WORLD = {
   playerSpeed: 122,
   collectRange: 178,
   dayDurationSeconds: 150,
+  /** 建造 / 搬动时人物到目标格中心允许的最大格距。 */
+  buildDistanceTiles: 2,
 } as const;
+
+export const PLACEMENT = {
+  /** 漂浮收集网的投影收集半径（屏幕像素）。 */
+  netCollectRadius: 150,
+  /** 普通设施搬动一次的消耗。 */
+  moveCostNormal: { wood: 1 } as Partial<Record<ResourceId, number>>,
+  /** 工坊、三角帆、电台、信标搬动一次的消耗。 */
+  moveCostAdvanced: { scrap: 1 } as Partial<Record<ResourceId, number>>,
+} as const;
+
+/** 搬动消耗废铁的高级设施。 */
+export const ADVANCED_MOVE_MODULES: PlaceableModuleId[] = ['workshop', 'sail', 'radio', 'beacon'];
 
 export const SURVIVAL = {
   hungerDrainPerSecond: 0.17,
@@ -91,70 +107,81 @@ export interface UpgradeDefinition {
   name: string;
   eyebrow: string;
   description: string;
-  category: 'foundation' | 'survival' | 'navigation';
+  category: BuildCategory;
   unlockLevel: number;
   requires?: RaftModuleId;
   signalRequired?: number;
   cost: Partial<Record<ResourceId, number>>;
+  /** deck / reinforcedDeck 是整体升级，不需要选择摆放格。 */
+  wholeRaftUpgrade?: boolean;
+  /** 漂浮收集网使用木筏外围边缘槽位。 */
+  edgeSlot?: boolean;
 }
 
 export const UPGRADES: UpgradeDefinition[] = [
   {
-    id: 'deck', name: '扩建甲板', eyebrow: 'LEVEL 02', category: 'foundation', unlockLevel: 1,
-    description: '把 2×2 木筏扩成 3×3，获得第一片真正的生活区。',
+    id: 'deck', name: '甲板扩建 · 阶段一', eyebrow: '', category: 'growth', unlockLevel: 1, wholeRaftUpgrade: true,
+    description: '把 2×2 木筏整体扩成 3×3，获得第一片真正的生活区。',
     cost: { wood: 6, plastic: 4 },
   },
   {
-    id: 'net', name: '漂浮收集网', eyebrow: 'AUTO COLLECT', category: 'survival', unlockLevel: 2, requires: 'deck',
-    description: '自动截获最近的漂浮物，研究可以继续提高速度。',
+    id: 'net', name: '漂浮收集网', eyebrow: '', category: 'survival', unlockLevel: 2, requires: 'deck', edgeSlot: true,
+    description: '挂在木筏外缘，自动截获漂进范围内的漂浮物。',
     cost: { wood: 4, plastic: 6, scrap: 1 },
   },
   {
-    id: 'purifier', name: '海水过滤器', eyebrow: 'FRESH WATER', category: 'survival', unlockLevel: 2, requires: 'deck',
+    id: 'purifier', name: '海水过滤器', eyebrow: '', category: 'survival', unlockLevel: 2, requires: 'deck',
     description: '定时凝结淡水，稳定解决最危险的口渴问题。',
     cost: { wood: 8, plastic: 4, scrap: 2 },
   },
   {
-    id: 'grill', name: '风干烤架', eyebrow: 'HOT MEAL', category: 'survival', unlockLevel: 3, requires: 'deck',
+    id: 'grill', name: '风干烤架', eyebrow: '', category: 'survival', unlockLevel: 3, requires: 'deck',
     description: '自动把鲜鱼烹成高恢复熟食，熟食还能治疗生命。',
     cost: { wood: 6, plastic: 2, scrap: 3, fiber: 2 },
   },
   {
-    id: 'storage', name: '加固储物箱', eyebrow: 'BONUS LOOT', category: 'survival', unlockLevel: 3, requires: 'deck',
+    id: 'storage', name: '加固储物箱', eyebrow: '', category: 'survival', unlockLevel: 3, requires: 'deck',
     description: '打捞普通资源时有机会额外保留一份材料。',
     cost: { wood: 8, plastic: 4, scrap: 2, fiber: 4 },
   },
   {
-    id: 'reinforcedDeck', name: '加固外环', eyebrow: 'LEVEL 03', category: 'foundation', unlockLevel: 4, requires: 'deck',
-    description: '扩成 4×4 大型木筏，并让结构更能抵御风暴。',
+    id: 'reinforcedDeck', name: '甲板扩建 · 阶段二', eyebrow: '', category: 'growth', unlockLevel: 4, requires: 'deck', wholeRaftUpgrade: true,
+    description: '整体扩成 4×4 大型木筏，并获得加固外环，更能抵御风暴。',
     cost: { wood: 14, plastic: 8, scrap: 5, fiber: 6 },
   },
   {
-    id: 'workshop', name: '精密工坊', eyebrow: 'ADVANCED TECH', category: 'foundation', unlockLevel: 5, requires: 'reinforcedDeck',
+    id: 'workshop', name: '精密工坊', eyebrow: '', category: 'engineering', unlockLevel: 5, requires: 'reinforcedDeck',
     description: '解锁远航设施，并提高从货箱中拆出精密零件的概率。',
     cost: { wood: 12, plastic: 8, scrap: 6, fiber: 4 },
   },
   {
-    id: 'sail', name: '三角帆', eyebrow: 'CHOOSE COURSE', category: 'navigation', unlockLevel: 5, requires: 'reinforcedDeck',
+    id: 'sail', name: '三角帆', eyebrow: '', category: 'navigation', unlockLevel: 5, requires: 'reinforcedDeck',
     description: '可选择打捞、渔场或避风航线，改变整局资源节奏。',
     cost: { wood: 10, plastic: 6, scrap: 4, fiber: 8 },
   },
   {
-    id: 'garden', name: '盐雾菜圃', eyebrow: 'PASSIVE FOOD', category: 'survival', unlockLevel: 6, requires: 'workshop',
+    id: 'garden', name: '盐雾菜圃', eyebrow: '', category: 'survival', unlockLevel: 6, requires: 'workshop',
     description: '定时收获一份海菜熟食，构成稳定的食物自动化。',
     cost: { wood: 12, plastic: 8, scrap: 5, fiber: 10 },
   },
   {
-    id: 'radio', name: '短波电台', eyebrow: 'TRACE SIGNAL', category: 'navigation', unlockLevel: 7, requires: 'workshop',
+    id: 'radio', name: '短波电台', eyebrow: '', category: 'navigation', unlockLevel: 7, requires: 'workshop',
     description: '放大海上信号并加快事件出现，开始追踪潮线之外的坐标。',
     cost: { wood: 18, plastic: 12, scrap: 10, parts: 6 },
   },
   {
-    id: 'beacon', name: '潮线信标', eyebrow: 'ENDLESS VOYAGE', category: 'navigation', unlockLevel: 9, requires: 'radio', signalRequired: 4,
+    id: 'beacon', name: '潮线信标', eyebrow: '', category: 'navigation', unlockLevel: 9, requires: 'radio', signalRequired: 4,
     description: '广播你的坐标。坚持到第 12 天后，开启无尽远航与每日合约。',
     cost: { wood: 26, plastic: 18, scrap: 16, parts: 12 },
   },
 ];
+
+export const BUILD_CATEGORY_LABELS: Record<BuildCategory, string> = {
+  growth: '甲板扩建',
+  survival: '生存设施',
+  engineering: '工程设施',
+  navigation: '航行设施',
+};
 
 export interface PerkDefinition {
   id: PerkId;

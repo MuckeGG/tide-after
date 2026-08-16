@@ -12,6 +12,7 @@ export type PlayerAction =
   | 'consume'
   | 'repair'
   | 'attack'
+  | 'switch'
   | 'hurt';
 
 export interface PlayerVisualState {

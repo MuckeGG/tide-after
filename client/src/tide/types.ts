@@ -29,6 +29,15 @@ export type RaftModuleId =
   | 'radio'
   | 'beacon';
 
+/** 需要玩家手动选择格子的设施；deck / reinforcedDeck 属于整体升级。 */
+export type PlaceableModuleId = Exclude<RaftModuleId, 'deck' | 'reinforcedDeck'>;
+
+export type ModulePlacement =
+  | { kind: 'tile'; gridX: number; gridY: number }
+  | { kind: 'edge'; side: 'north' | 'east' | 'south' | 'west'; index: number };
+
+export type BuildCategory = 'growth' | 'survival' | 'engineering' | 'navigation';
+
 export type PerkId =
   | 'hook'
   | 'angler'
@@ -103,6 +112,7 @@ export interface RaftState {
   size: 2 | 3 | 4;
   integrity: number;
   modules: Record<RaftModuleId, boolean>;
+  placements: Partial<Record<PlaceableModuleId, ModulePlacement>>;
 }
 
 export interface WorldState {
@@ -209,3 +219,11 @@ export interface TideGameState {
 export type BuildResult =
   | { ok: true; state: TideGameState }
   | { ok: false; reason: string; state: TideGameState };
+
+/** 摆放模式的客户端瞬时状态，不进入存档；locate 用于短暂高亮已建设施。 */
+export interface PlacementIntent {
+  mode: 'build' | 'move' | 'locate';
+  moduleId: PlaceableModuleId;
+  source?: ModulePlacement;
+  hover?: ModulePlacement;
+}

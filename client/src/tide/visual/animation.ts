@@ -21,6 +21,7 @@ export const ACTION_SPECS: Record<PlayerAction, ActionSpec> = {
   consume: { duration: 620, commitAt: 0.52, priority: 3, locksMovement: false },
   repair: { duration: 980, commitAt: 0.7, priority: 5, locksMovement: true },
   attack: { duration: 520, commitAt: 0.38, priority: 6, locksMovement: true },
+  switch: { duration: 340, commitAt: null, priority: 2, locksMovement: false },
   hurt: { duration: 480, commitAt: null, priority: 10, locksMovement: true },
 };
 

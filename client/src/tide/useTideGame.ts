@@ -4,6 +4,7 @@ import {
   buildModule,
   collectNearby,
   consumeResource,
+  moveModule,
   movePlayer,
   repairRaft,
   resolveOceanEvent,
@@ -24,7 +25,9 @@ import { resolveMovementDirection, visualDirectionFromLegacy } from './visual/ut
 import type {
   ConsumableId,
   EquipmentId,
+  ModulePlacement,
   PerkId,
+  PlaceableModuleId,
   RaftModuleId,
   RouteMode,
   TideGameState,
@@ -219,8 +222,12 @@ export const useTideGame = () => {
     setState((current) => consumeResource(current, resource));
   }, []);
 
-  const build = useCallback((moduleId: RaftModuleId) => {
-    setState((current) => buildModule(current, moduleId).state);
+  const build = useCallback((moduleId: RaftModuleId, placement?: ModulePlacement) => {
+    setState((current) => buildModule(current, moduleId, placement).state);
+  }, []);
+
+  const relocate = useCallback((moduleId: PlaceableModuleId, placement: ModulePlacement) => {
+    setState((current) => moveModule(current, moduleId, placement).state);
   }, []);
 
   const restart = useCallback(() => {
@@ -276,6 +283,7 @@ export const useTideGame = () => {
       fish,
       consume,
       build,
+      relocate,
       repair,
       selectEquipment: selectTool,
       attack,

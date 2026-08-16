@@ -1,6 +1,13 @@
 import { useCallback, useEffect, useRef, useState, type MutableRefObject } from 'react';
 import { COMBAT, WORLD } from '../config';
-import type { ConsumableId, RaftModuleId, TideGameState } from '../types';
+import type {
+  ConsumableId,
+  EquipmentId,
+  ModulePlacement,
+  PlaceableModuleId,
+  RaftModuleId,
+  TideGameState,
+} from '../types';
 import {
   ACTION_SPECS,
   ActionCommitGate,
@@ -21,7 +28,9 @@ interface GameActions {
   collect: (id?: string) => void;
   fish: () => void;
   consume: (resource: ConsumableId) => void;
-  build: (moduleId: RaftModuleId) => void;
+  build: (moduleId: RaftModuleId, placement?: ModulePlacement) => void;
+  relocate: (moduleId: PlaceableModuleId, placement: ModulePlacement) => void;
+  selectEquipment: (equipment: EquipmentId) => void;
   repair: () => void;
   attack: (enemyId?: string) => void;
   setMovementLocked: (locked: boolean) => void;
@@ -217,11 +226,23 @@ export const useTideVisualActions = (
     });
   }, [movementIntentRef, run]);
 
-  const build = useCallback((moduleId: RaftModuleId) => {
+  const build = useCallback((moduleId: RaftModuleId, placement?: ModulePlacement, target?: { x: number; y: number }) => {
     return run('build', {
-      target: { x: 480, y: 260 },
-      commit: () => actionsRef.current.build(moduleId),
+      target: target ?? { x: 480, y: 260 },
+      commit: () => actionsRef.current.build(moduleId, placement),
     });
+  }, [run]);
+
+  const relocate = useCallback((moduleId: PlaceableModuleId, placement: ModulePlacement, target: { x: number; y: number }) => {
+    return run('build', {
+      target,
+      commit: () => actionsRef.current.relocate(moduleId, placement),
+    });
+  }, [run]);
+
+  const switchGear = useCallback((equipment: EquipmentId) => {
+    actionsRef.current.selectEquipment(equipment);
+    return run('switch');
   }, [run]);
 
   const consume = useCallback((resource: ConsumableId) => (
@@ -297,6 +318,6 @@ export const useTideVisualActions = (
     effectsRef,
     feedback,
     busy: visual.action !== 'idle' && visual.action !== 'walk' && visual.action !== 'fishWait',
-    actions: { collect, fish, build, consume, repair, attack, invalid },
+    actions: { collect, fish, build, relocate, switchGear, consume, repair, attack, invalid },
   };
 };

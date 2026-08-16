@@ -14,6 +14,8 @@ export interface WaterContactProfile {
   wakeStrength: number;
   bubbleRate: number;
   displaySize: number;
+  /** 水面遮挡掉的高度比例：水下部分只保留非常淡的轮廓。 */
+  hiddenFraction: number;
 }
 
 const clamp01 = (value: number) => Math.min(1, Math.max(0, value));
@@ -51,9 +53,9 @@ export const sampleWaterSurface = (
 };
 
 export const DEBRIS_WATER_PROFILES: Record<DebrisType, WaterContactProfile> = {
-  wood: { submerge: 4, bobStrength: 0.75, rollStrength: 0.55, wakeStrength: 0.8, bubbleRate: 0.25, displaySize: 44 },
-  plastic: { submerge: 7, bobStrength: 1.15, rollStrength: 1.15, wakeStrength: 0.5, bubbleRate: 0.62, displaySize: 40 },
-  scrap: { submerge: 11, bobStrength: 0.42, rollStrength: 0.32, wakeStrength: 1.05, bubbleRate: 0.48, displaySize: 43 },
-  fiber: { submerge: 6, bobStrength: 0.92, rollStrength: 0.78, wakeStrength: 0.36, bubbleRate: 0.2, displaySize: 42 },
-  crate: { submerge: 8, bobStrength: 0.5, rollStrength: 0.28, wakeStrength: 1.25, bubbleRate: 0.36, displaySize: 52 },
+  wood: { submerge: 4, bobStrength: 0.75, rollStrength: 0.55, wakeStrength: 0.8, bubbleRate: 0.25, displaySize: 44, hiddenFraction: 0.35 },
+  plastic: { submerge: 7, bobStrength: 1.15, rollStrength: 1.15, wakeStrength: 0.5, bubbleRate: 0.62, displaySize: 40, hiddenFraction: 0.45 },
+  scrap: { submerge: 11, bobStrength: 0.42, rollStrength: 0.32, wakeStrength: 1.05, bubbleRate: 0.48, displaySize: 43, hiddenFraction: 0.55 },
+  fiber: { submerge: 6, bobStrength: 0.92, rollStrength: 0.78, wakeStrength: 0.36, bubbleRate: 0.2, displaySize: 42, hiddenFraction: 0.45 },
+  crate: { submerge: 8, bobStrength: 0.5, rollStrength: 0.28, wakeStrength: 1.25, bubbleRate: 0.36, displaySize: 52, hiddenFraction: 0.45 },
 };

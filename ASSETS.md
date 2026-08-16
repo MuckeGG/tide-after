@@ -47,7 +47,9 @@
 
 > Original handcrafted pixel-art contact sheet for an isometric ocean survival game; weathered tide crab, elite bioluminescent abyss lantern beast, sailor cutlass, salvage axe-hammer, fishing rod, floating wood, plastic bottle, rusty scrap, rope fiber and cargo crate; readable silhouettes, restrained teal/copper/rust palette, pure magenta background, no logo, text or copyrighted character.
 
-运行时海面不会直接平铺生成图。水面由确定性的低频涌浪、交叉浪、碎浪和前景浪峰组成，木筏、漂浮物、浮标与游泳怪物共享同一水面采样。
+运行时海面不会直接平铺生成图。水面由确定性的低频涌浪、交叉浪、白色破浪（浪尖形成 → 展开 → 破碎白沫 → 消失）组成，木筏、漂浮物、浮标与游泳怪物共享同一水面采样。
+
+2026-08 简化重构：人物手持的弯刀、斧锤和鱼竿改为 Canvas 程序化绘制的 24×24 风格简洁像素工具，按八方向手部锚点跟随人物，不新增位图素材；漂浮物水下部分改为真正的画布裁切（默认隐藏约 45%，木板 35%、废铁 55%），仅保留淡色水下轮廓。素材清单与许可边界不变。
 
 ## 本地参考模式
 

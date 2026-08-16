@@ -1,8 +1,10 @@
 import {
   ACHIEVEMENTS,
+  ADVANCED_MOVE_MODULES,
   CHAPTERS,
   COMBAT,
   PERKS,
+  PLACEMENT,
   RESOURCE_LABELS,
   SPAWNING,
   STARTING_INVENTORY,
@@ -21,8 +23,10 @@ import type {
   EquipmentId,
   EventKind,
   GameNotice,
+  ModulePlacement,
   OceanEvent,
   PerkId,
+  PlaceableModuleId,
   RaftModuleId,
   ResourceId,
   RouteMode,
@@ -58,7 +62,7 @@ const cloneState = (state: TideGameState): TideGameState => ({
   player: { ...state.player },
   inventory: { ...state.inventory },
   equipment: { ...state.equipment },
-  raft: { ...state.raft, modules: { ...state.raft.modules } },
+  raft: { ...state.raft, modules: { ...state.raft.modules }, placements: { ...state.raft.placements } },
   world: { ...state.world },
   progress: {
     ...state.progress,
@@ -519,6 +523,148 @@ const emptyModules = (): TideGameState['raft']['modules'] => ({
   beacon: false,
 });
 
+const PLACEABLE_IDS: PlaceableModuleId[] = [
+  'net', 'purifier', 'grill', 'storage', 'workshop', 'sail', 'garden', 'radio', 'beacon',
+];
+
+const tileCenter = (state: TideGameState, gridX: number, gridY: number) => ({
+  x: WORLD.centerX - (state.raft.size * WORLD.tileSize) / 2
+    + (gridX + 0.5) * WORLD.tileSize,
+  y: WORLD.centerY - (state.raft.size * WORLD.tileSize) / 2
+    + (gridY + 0.5) * WORLD.tileSize,
+});
+
+/** 边缘槽位悬在木筏外侧的水面上，不占用行走格。 */
+export const getPlacementWorldPoint = (
+  state: TideGameState,
+  placement: ModulePlacement,
+): { x: number; y: number } => {
+  const tile = WORLD.tileSize;
+  const half = (state.raft.size * tile) / 2;
+  if (placement.kind === 'tile') return tileCenter(state, placement.gridX, placement.gridY);
+  const along = -half + (placement.index + 0.5) * tile;
+  if (placement.side === 'north') return { x: WORLD.centerX + along, y: WORLD.centerY - half - tile * 0.42 };
+  if (placement.side === 'south') return { x: WORLD.centerX + along, y: WORLD.centerY + half + tile * 0.42 };
+  if (placement.side === 'west') return { x: WORLD.centerX - half - tile * 0.42, y: WORLD.centerY + along };
+  return { x: WORLD.centerX + half + tile * 0.42, y: WORLD.centerY + along };
+};
+
+export const isEdgePlacement = (moduleId: RaftModuleId) =>
+  Boolean(UPGRADES.find((upgrade) => upgrade.id === moduleId)?.edgeSlot);
+
+const placementWithinRange = (
+  state: TideGameState,
+  point: { x: number; y: number },
+) => {
+  const limit = (WORLD.buildDistanceTiles + 0.5) * WORLD.tileSize;
+  return Math.max(
+    Math.abs(point.x - state.player.x),
+    Math.abs(point.y - state.player.y),
+  ) <= limit;
+};
+
+export const getOccupyingPlacement = (
+  state: TideGameState,
+  placement: ModulePlacement,
+  ignore?: PlaceableModuleId,
+): PlaceableModuleId | null => {
+  for (const id of PLACEABLE_IDS) {
+    if (id === ignore || !state.raft.modules[id]) continue;
+    const existing = state.raft.placements[id];
+    if (!existing) continue;
+    if (existing.kind === placement.kind) {
+      if (existing.kind === 'tile' && placement.kind === 'tile'
+        && existing.gridX === placement.gridX && existing.gridY === placement.gridY) return id;
+      if (existing.kind === 'edge' && placement.kind === 'edge'
+        && existing.side === placement.side && existing.index === placement.index) return id;
+    }
+  }
+  return null;
+};
+
+export const validatePlacement = (
+  state: TideGameState,
+  moduleId: PlaceableModuleId,
+  placement: ModulePlacement,
+): { ok: true } | { ok: false; reason: string } => {
+  if (placement.kind === 'tile') {
+    if (isEdgePlacement(moduleId)) return { ok: false, reason: '收集网只能放在木筏外围边缘。' };
+    if (placement.gridX < 0 || placement.gridY < 0
+      || placement.gridX >= state.raft.size || placement.gridY >= state.raft.size) {
+      return { ok: false, reason: '目标格越出甲板范围。' };
+    }
+  } else {
+    if (!isEdgePlacement(moduleId)) return { ok: false, reason: '该设施必须摆在甲板格上。' };
+    if (placement.index < 0 || placement.index >= state.raft.size) {
+      return { ok: false, reason: '边缘槽越出木筏范围。' };
+    }
+  }
+  const occupiedBy = getOccupyingPlacement(state, placement, state.raft.modules[moduleId] ? moduleId : undefined);
+  if (occupiedBy) return { ok: false, reason: '该位置已经被其他设施占用。' };
+  const point = getPlacementWorldPoint(state, placement);
+  if (!placementWithinRange(state, point)) {
+    return { ok: false, reason: `距离太远，走到目标格两格以内再${state.raft.modules[moduleId] ? '搬动' : '建造'}。` };
+  }
+  return { ok: true };
+};
+
+/** 已建成设施的世界坐标；等待摆放的设施返回 null。 */
+export const getFacilityWorldPoint = (
+  state: TideGameState,
+  moduleId: PlaceableModuleId,
+): { x: number; y: number } | null => {
+  if (!state.raft.modules[moduleId]) return null;
+  const placement = state.raft.placements[moduleId];
+  return placement ? getPlacementWorldPoint(state, placement) : null;
+};
+
+/** 收集网当前收集中心；未建成或未摆放时为 null。 */
+export const getNetCollectOrigin = (state: TideGameState) => getFacilityWorldPoint(state, 'net');
+
+/** 旧存档缺少摆放数据时，按当前木筏尺寸生成确定性默认布局。 */
+export const assignDefaultPlacements = (state: TideGameState) => {
+  const priority: PlaceableModuleId[] = ['net', 'purifier', 'grill', 'storage', 'garden'];
+  const fallbackOrder: PlaceableModuleId[] = ['workshop', 'sail', 'radio', 'beacon'];
+  const occupied = new Set<string>();
+  for (const id of PLACEABLE_IDS) {
+    const existing = state.raft.placements[id];
+    if (state.raft.modules[id] && existing) {
+      occupied.add(existing.kind === 'tile'
+        ? `tile-${existing.gridX}-${existing.gridY}`
+        : `edge-${existing.side}-${existing.index}`);
+    }
+  }
+  const takeTile = (): ModulePlacement | null => {
+    for (let y = 0; y < state.raft.size; y += 1) {
+      for (let x = 0; x < state.raft.size; x += 1) {
+        const key = `tile-${x}-${y}`;
+        if (!occupied.has(key)) {
+          occupied.add(key);
+          return { kind: 'tile', gridX: x, gridY: y };
+        }
+      }
+    }
+    return null;
+  };
+  const takeEdge = (): ModulePlacement | null => {
+    for (const side of ['south', 'east', 'west', 'north'] as const) {
+      for (let index = 0; index < state.raft.size; index += 1) {
+        const key = `edge-${side}-${index}`;
+        if (!occupied.has(key)) {
+          occupied.add(key);
+          return { kind: 'edge', side, index };
+        }
+      }
+    }
+    return null;
+  };
+  for (const id of [...priority, ...fallbackOrder]) {
+    if (!state.raft.modules[id] || state.raft.placements[id]) continue;
+    const placement = isEdgePlacement(id) ? takeEdge() : takeTile();
+    if (placement) state.raft.placements[id] = placement;
+  }
+};
+
 export const createInitialGame = (
   guestId: string,
   seed = Math.floor(Date.now() % 2_147_483_647),
@@ -540,7 +686,7 @@ export const createInitialGame = (
     },
     inventory: { ...STARTING_INVENTORY },
     equipment: { selected: 'cutlass', nextAttackAt: 0 },
-    raft: { size: 2, integrity: 100, modules: emptyModules() },
+    raft: { size: 2, integrity: 100, modules: emptyModules(), placements: {} },
     world: {
       seed,
       elapsedSeconds: 0,
@@ -622,8 +768,36 @@ export const movePlayer = (
   const previousX = next.player.x;
   const previousY = next.player.y;
 
-  next.player.x = clamp(next.player.x + moveX, WORLD.centerX - halfRaft + padding, WORLD.centerX + halfRaft - padding);
-  next.player.y = clamp(next.player.y + moveY, WORLD.centerY - halfRaft + padding, WORLD.centerY + halfRaft - padding);
+  // 预测移动 + 边缘滑动：先算完整目标，越界方向被截断时保留切线分量，
+  // 角点按最近合法边投影，避免人物锁死在木筏角落。
+  const minX = WORLD.centerX - halfRaft + padding;
+  const maxX = WORLD.centerX + halfRaft - padding;
+  const minY = WORLD.centerY - halfRaft + padding;
+  const maxY = WORLD.centerY + halfRaft - padding;
+  const targetX = next.player.x + moveX;
+  const targetY = next.player.y + moveY;
+  const beyondX = targetX < minX || targetX > maxX;
+  const beyondY = targetY < minY || targetY > maxY;
+  if (beyondX && beyondY) {
+    // 角点：投影到最近的合法边，保留仍合法的另一个分量。
+    const clampedX = clamp(targetX, minX, maxX);
+    const clampedY = clamp(targetY, minY, maxY);
+    const slackX = clampedX === next.player.x ? 0 : 1;
+    const slackY = clampedY === next.player.y ? 0 : 1;
+    if (slackX && !slackY) next.player.x = clampedX;
+    else if (slackY && !slackX) next.player.y = clampedY;
+    else if (Math.abs(moveX) >= Math.abs(moveY)) next.player.x = clampedX;
+    else next.player.y = clampedY;
+  } else if (beyondX) {
+    next.player.x = clamp(targetX, minX, maxX);
+    next.player.y = clamp(targetY, minY, maxY);
+  } else if (beyondY) {
+    next.player.y = clamp(targetY, minY, maxY);
+    next.player.x = clamp(targetX, minX, maxX);
+  } else {
+    next.player.x = targetX;
+    next.player.y = targetY;
+  }
   next.progress.stats.distanceMoved += Math.hypot(next.player.x - previousX, next.player.y - previousY);
   if (Math.abs(directionX) > Math.abs(directionY)) next.player.facing = directionX > 0 ? 'right' : 'left';
   else next.player.facing = directionY > 0 ? 'down' : 'up';
@@ -771,7 +945,11 @@ export const consumeResource = (state: TideGameState, resource: ConsumableId) =>
 export const canAfford = (state: TideGameState, cost: Partial<Record<ResourceId, number>>) =>
   Object.entries(cost).every(([resource, quantity]) => state.inventory[resource as ResourceId] >= (quantity ?? 0));
 
-export const buildModule = (state: TideGameState, moduleId: RaftModuleId): BuildResult => {
+export const buildModule = (
+  state: TideGameState,
+  moduleId: RaftModuleId,
+  placement?: ModulePlacement,
+): BuildResult => {
   const next = cloneState(state);
   const definition = UPGRADES.find((upgrade) => upgrade.id === moduleId);
   if (!definition) return { ok: false, reason: '未知设施。', state: next };
@@ -798,10 +976,24 @@ export const buildModule = (state: TideGameState, moduleId: RaftModuleId): Build
     addNotice(next, reason, 'warning');
     return { ok: false, reason, state: finalize(next) };
   }
+  const placeableId = moduleId as PlaceableModuleId;
+  if (!definition.wholeRaftUpgrade) {
+    if (!placement) {
+      return { ok: false, reason: '该设施需要先选择摆放位置。', state: next };
+    }
+    const check = validatePlacement(next, placeableId, placement);
+    if (!check.ok) {
+      addNotice(next, check.reason, 'warning');
+      return { ok: false, reason: check.reason, state: finalize(next) };
+    }
+  }
   for (const [resource, quantity] of Object.entries(definition.cost) as [ResourceId, number][]) {
     next.inventory[resource] -= quantity;
   }
   next.raft.modules[moduleId] = true;
+  if (!definition.wholeRaftUpgrade && placement) {
+    next.raft.placements[placeableId] = placement;
+  }
   next.progress.stats.built += 1;
   if (moduleId === 'deck') next.raft.size = 3;
   if (moduleId === 'reinforcedDeck') {
@@ -816,6 +1008,47 @@ export const buildModule = (state: TideGameState, moduleId: RaftModuleId): Build
   awardXp(next, 32 + definition.unlockLevel * 5);
   next.progress.score += 200 + definition.unlockLevel * 40;
   addNotice(next, `${definition.name}建造完成。木筏进入新的阶段。`, 'good');
+  return { ok: true, state: finalize(next) };
+};
+
+/** 已建设施重新摆放：普通设施消耗木板 1，高级设施消耗废铁 1。 */
+export const moveModule = (
+  state: TideGameState,
+  moduleId: PlaceableModuleId,
+  placement: ModulePlacement,
+): BuildResult => {
+  const next = cloneState(state);
+  if (!next.raft.modules[moduleId]) return { ok: false, reason: '该设施尚未建造。', state: next };
+  const source = next.raft.placements[moduleId];
+  if (!source) return { ok: false, reason: '该设施还在等待摆放。', state: next };
+  if (source.kind === placement.kind) {
+    const same = source.kind === 'tile' && placement.kind === 'tile'
+      ? source.gridX === placement.gridX && source.gridY === placement.gridY
+      : source.kind === 'edge' && placement.kind === 'edge'
+        ? source.side === placement.side && source.index === placement.index
+        : false;
+    if (same) return { ok: false, reason: '目标位置与原位置相同。', state: next };
+  }
+  const check = validatePlacement(next, moduleId, placement);
+  if (!check.ok) {
+    addNotice(next, check.reason, 'warning');
+    return { ok: false, reason: check.reason, state: finalize(next) };
+  }
+  const cost = ADVANCED_MOVE_MODULES.includes(moduleId)
+    ? PLACEMENT.moveCostAdvanced
+    : PLACEMENT.moveCostNormal;
+  if (!canAfford(next, cost)) {
+    const reason = ADVANCED_MOVE_MODULES.includes(moduleId)
+      ? '搬动该设施需要废铁 ×1。'
+      : '搬动设施需要木板 ×1。';
+    addNotice(next, reason, 'warning');
+    return { ok: false, reason, state: finalize(next) };
+  }
+  for (const [resource, quantity] of Object.entries(cost) as [ResourceId, number][]) {
+    next.inventory[resource] -= quantity;
+  }
+  next.raft.placements[moduleId] = placement;
+  addNotice(next, '设施搬动完成。', 'good');
   return { ok: true, state: finalize(next) };
 };
 
@@ -1078,7 +1311,8 @@ export const resolveOceanEvent = (state: TideGameState, choiceId: string) => {
   return finalize(next);
 };
 
-const createOceanEvent = (state: TideGameState): OceanEvent => {
+/** 事件生成暂被关闭，保留生成逻辑供后续海讯系统复用。 */
+export const createOceanEvent = (state: TideGameState): OceanEvent => {
   const roll = takeRandom(state);
   let kind: EventKind;
   if (state.world.weather === 'storm' && roll < 0.38) kind = 'storm';
@@ -1180,11 +1414,16 @@ export const tickGame = (state: TideGameState, deltaSeconds: number) => {
 
   const automationFactor = 1 - next.progress.perks.automation * 0.1;
   if (next.raft.modules.net && next.world.elapsedSeconds >= next.world.nextNetAt) {
-    const target = [...next.debris].sort((a, b) =>
-      Math.hypot(a.x - WORLD.centerX, a.y - WORLD.centerY) - Math.hypot(b.x - WORLD.centerX, b.y - WORLD.centerY))[0];
-    if (target) {
-      grantDebris(next, target, 'net');
-      next.debris = next.debris.filter((item) => item.id !== target.id);
+    const netOrigin = getNetCollectOrigin(next);
+    if (netOrigin) {
+      const target = next.debris
+        .map((item) => ({ item, distance: projectedDistance(item, netOrigin) }))
+        .filter(({ distance }) => distance <= PLACEMENT.netCollectRadius)
+        .sort((a, b) => a.distance - b.distance)[0]?.item;
+      if (target) {
+        grantDebris(next, target, 'net');
+        next.debris = next.debris.filter((item) => item.id !== target.id);
+      }
     }
     next.world.nextNetAt = next.world.elapsedSeconds + SPAWNING.netIntervalSeconds * automationFactor;
   }
@@ -1221,13 +1460,9 @@ export const tickGame = (state: TideGameState, deltaSeconds: number) => {
     next.world.nextStormHitAt = next.world.elapsedSeconds + SPAWNING.stormHitIntervalSeconds;
   }
 
-  if (!next.event && next.world.elapsedSeconds >= next.world.nextEventAt) {
-    next.event = createOceanEvent(next);
-    const radioFactor = next.raft.modules.radio ? 0.68 : 1;
-    next.world.nextEventAt = next.world.elapsedSeconds + SPAWNING.eventIntervalSeconds * radioFactor + takeRandom(next) * 18;
-    addNotice(next, `海平线上出现新情况：${EVENT_PRESENTATIONS[next.event.kind].title}。`, 'info');
-  }
-  if (next.event && next.world.elapsedSeconds >= next.event.expiresAt) resolveEventMutable(next, 'ignore', true);
+  // 随机海上事件暂时关闭：不再自动弹出全屏事件页。
+  // 事件数据结构与处理逻辑保留，供后续改造成玩家主动打开的海讯系统。
+  if (next.event) next.event = null;
 
   if (next.progress.combo > 0 && next.world.elapsedSeconds > next.progress.comboExpiresAt) next.progress.combo = 0;
   if (next.player.health <= 0) {

@@ -1,4 +1,4 @@
-import { createGuestId, createInitialGame } from './game';
+import { assignDefaultPlacements, createGuestId, createInitialGame } from './game';
 import type {
   DebrisItem,
   FishingState,
@@ -60,9 +60,10 @@ const isValidSave = (value: unknown): value is TideGameState => {
 
 const normalizeV2Save = (value: TideGameState): TideGameState => {
   const fresh = createInitialGame(value.guestId, value.world.seed);
-  return {
+  const normalized: TideGameState = {
     ...value,
     equipment: value.equipment ?? fresh.equipment,
+    raft: { ...value.raft, placements: value.raft.placements ?? {} },
     world: {
       ...value.world,
       nextEnemyAt: value.world.nextEnemyAt ?? value.world.elapsedSeconds + 5,
@@ -75,7 +76,11 @@ const normalizeV2Save = (value: TideGameState): TideGameState => {
       },
     },
     enemies: Array.isArray(value.enemies) ? value.enemies : [],
+    // 随机海上事件已关闭：加载时直接清除未处理事件，不扣资源、不记失败。
+    event: null,
   };
+  assignDefaultPlacements(normalized);
+  return normalized;
 };
 
 export const migrateSave = (value: unknown, fallbackGuestId: string): TideGameState | null => {
@@ -100,6 +105,7 @@ export const migrateSave = (value: unknown, fallbackGuestId: string): TideGameSt
     size: legacy.raft.size === 3 ? 3 : legacy.raft.size === 4 ? 4 : 2,
     modules: { ...migrated.raft.modules, ...legacy.raft.modules },
   };
+  assignDefaultPlacements(migrated);
   migrated.world = { ...migrated.world, ...legacy.world };
   migrated.debris = Array.isArray(legacy.debris) ? legacy.debris : migrated.debris;
   migrated.fishing = { ...migrated.fishing, ...legacy.fishing };

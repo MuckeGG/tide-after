@@ -1,11 +1,14 @@
 import { describe, expect, it } from 'vitest';
 import {
+  assignDefaultPlacements,
   attackEnemy,
   buildModule,
   collectNearby,
   consumeResource,
   createInitialGame,
   getContractProgress,
+  getNetCollectOrigin,
+  moveModule,
   movePlayer,
   repairRaft,
   resolveFishing,
@@ -16,11 +19,18 @@ import {
   startFishing,
   tickGame,
   upgradePerk,
+  validatePlacement,
 } from './game';
 import { migrateSave } from './persistence';
-import { COMBAT, SPAWNING, WORLD } from './config';
+import { COMBAT, PLACEMENT, SPAWNING, WORLD } from './config';
 import { projectedDistance, projectWorldVector } from './visual/projection';
-import type { RaftModuleId, ResourceId, TideGameState } from './types';
+import type {
+  ModulePlacement,
+  PlaceableModuleId,
+  RaftModuleId,
+  ResourceId,
+  TideGameState,
+} from './types';
 
 const fund = (state: TideGameState, quantity = 999) => {
   (Object.keys(state.inventory) as ResourceId[]).forEach((resource) => {
@@ -31,8 +41,22 @@ const fund = (state: TideGameState, quantity = 999) => {
   return state;
 };
 
+const DEFAULT_PLACEMENTS: Partial<Record<PlaceableModuleId, ModulePlacement>> = {
+  net: { kind: 'edge', side: 'south', index: 0 },
+  purifier: { kind: 'tile', gridX: 0, gridY: 0 },
+  grill: { kind: 'tile', gridX: 2, gridY: 0 },
+  storage: { kind: 'tile', gridX: 0, gridY: 2 },
+  workshop: { kind: 'tile', gridX: 1, gridY: 1 },
+  sail: { kind: 'tile', gridX: 2, gridY: 1 },
+  garden: { kind: 'tile', gridX: 2, gridY: 2 },
+  radio: { kind: 'tile', gridX: 0, gridY: 1 },
+  beacon: { kind: 'tile', gridX: 1, gridY: 0 },
+};
+
 const buildSequence = (state: TideGameState, modules: RaftModuleId[]) =>
-  modules.reduce((current, module) => buildModule(current, module).state, state);
+  modules.reduce((current, module) => (
+    buildModule(current, module, DEFAULT_PLACEMENTS[module as PlaceableModuleId]).state
+  ), state);
 
 describe('Tide After game engine', () => {
   it('creates the generous v2 starting state', () => {
@@ -177,6 +201,125 @@ describe('Tide After game engine', () => {
     expect(complete.progress.stats.built).toBe(11);
   });
 
+  it('slides along raft edges and corners without getting stuck', () => {
+    const state = createInitialGame('guest-slide', 42);
+    // 走到右上角附近（北边界 + 东边界）。
+    const half = WORLD.tileSize - WORLD.playerRadius - 5;
+    let corner = state;
+    for (let index = 0; index < 200; index += 1) corner = movePlayer(corner, 1, -1, 0.05);
+    expect(Math.abs(corner.player.y - (WORLD.centerY - half))).toBeLessThanOrEqual(0.01);
+    expect(Math.abs(corner.player.x - (WORLD.centerX + half))).toBeLessThanOrEqual(0.01);
+    // 持续朝角落推进：位置保持合法且不抖动、不越界。
+    const frozen = corner;
+    for (let index = 0; index < 40; index += 1) corner = movePlayer(corner, 1, -1, 0.05);
+    expect(corner.player.x).toBeLessThanOrEqual(WORLD.centerX + half + 0.01);
+    expect(corner.player.y).toBeGreaterThanOrEqual(WORLD.centerY - half - 0.01);
+    // 贴着北边横向移动仍可滑动。
+    let sliding = frozen;
+    for (let index = 0; index < 15; index += 1) sliding = movePlayer(sliding, -1, -1, 0.05);
+    expect(sliding.player.x).toBeLessThan(frozen.player.x - 60);
+    expect(Math.abs(sliding.player.y - (WORLD.centerY - half))).toBeLessThanOrEqual(0.01);
+  });
+
+  it('validates placement legality: bounds, occupancy, edge slots and distance', () => {
+    const state = fund(createInitialGame('guest-place', 42));
+    state.raft.modules.deck = true;
+    state.raft.size = 3;
+    expect(validatePlacement(state, 'purifier', { kind: 'tile', gridX: 3, gridY: 0 }).ok).toBe(false);
+    expect(validatePlacement(state, 'purifier', { kind: 'edge', side: 'south', index: 0 }).ok).toBe(false);
+    expect(validatePlacement(state, 'net', { kind: 'tile', gridX: 1, gridY: 1 }).ok).toBe(false);
+    expect(validatePlacement(state, 'net', { kind: 'edge', side: 'south', index: 3 }).ok).toBe(false);
+    // 3×3 内中心两格覆盖全场；4×4 木筏上远离目标格时才越界。
+    state.raft.size = 4;
+    state.raft.modules.reinforcedDeck = true;
+    state.player.x = WORLD.centerX + 100;
+    state.player.y = WORLD.centerY + 100;
+    expect(validatePlacement(state, 'purifier', { kind: 'tile', gridX: 0, gridY: 0 }).ok).toBe(false);
+    state.raft.size = 3;
+    state.raft.modules.reinforcedDeck = false;
+    state.player.x = WORLD.centerX;
+    state.player.y = WORLD.centerY;
+    const built = buildModule(state, 'purifier', { kind: 'tile', gridX: 1, gridY: 1 });
+    expect(built.ok).toBe(true);
+    expect(built.state.raft.placements.purifier).toEqual({ kind: 'tile', gridX: 1, gridY: 1 });
+    // 占用格不可重复建造。
+    const occupied = buildModule(built.state, 'grill', { kind: 'tile', gridX: 1, gridY: 1 });
+    expect(occupied.ok).toBe(false);
+    // 没有摆放位置时不能建造可放置设施。
+    expect(buildModule(built.state, 'grill').ok).toBe(false);
+  });
+
+  it('moves built modules with material costs and keeps failures free', () => {
+    const state = fund(createInitialGame('guest-move', 42));
+    state.raft.modules.deck = true;
+    state.raft.size = 3;
+    state.raft.modules.purifier = true;
+    state.raft.placements.purifier = { kind: 'tile', gridX: 0, gridY: 0 };
+    state.inventory.wood = 1;
+    state.inventory.scrap = 1;
+    const moved = moveModule(state, 'purifier', { kind: 'tile', gridX: 2, gridY: 2 });
+    expect(moved.ok).toBe(true);
+    expect(moved.state.inventory.wood).toBe(0);
+    expect(moved.state.raft.placements.purifier).toEqual({ kind: 'tile', gridX: 2, gridY: 2 });
+    // 材料不足时失败且不扣料。
+    const failed = moveModule(moved.state, 'purifier', { kind: 'tile', gridX: 0, gridY: 0 });
+    expect(failed.ok).toBe(false);
+    expect(failed.state.inventory.wood).toBe(0);
+    // 高级设施搬动消耗废铁。
+    failed.state.raft.modules.sail = true;
+    failed.state.raft.placements.sail = { kind: 'tile', gridX: 1, gridY: 0 };
+    const sailMoved = moveModule(failed.state, 'sail', { kind: 'tile', gridX: 1, gridY: 2 });
+    expect(sailMoved.ok).toBe(true);
+    expect(sailMoved.state.inventory.scrap).toBe(0);
+    expect(sailMoved.state.inventory.wood).toBe(0);
+  });
+
+  it('keeps module placements valid across the two deck growth stages', () => {
+    const state = fund(createInitialGame('guest-growth', 42));
+    const built = buildSequence(state, [
+      'deck', 'net', 'purifier', 'grill', 'storage', 'reinforcedDeck',
+      'workshop', 'sail', 'garden', 'radio', 'beacon',
+    ]);
+    expect(built.raft.size).toBe(4);
+    expect(built.raft.modules.reinforcedDeck).toBe(true);
+    for (const [moduleId, placement] of Object.entries(built.raft.placements) as [PlaceableModuleId, ModulePlacement][]) {
+      if (placement.kind === 'tile') {
+        expect(placement.gridX).toBeLessThan(built.raft.size);
+        expect(placement.gridY).toBeLessThan(built.raft.size);
+      } else {
+        expect(placement.index).toBeLessThan(built.raft.size);
+      }
+      expect(validatePlacement(built, moduleId, placement).ok).toBe(true);
+    }
+  });
+
+  it('assigns deterministic default placements to legacy saves', () => {
+    const state = createInitialGame('guest-legacy-layout', 42);
+    state.raft.modules.deck = true;
+    state.raft.size = 3;
+    state.raft.modules.net = true;
+    state.raft.modules.purifier = true;
+    state.raft.placements = {};
+    assignDefaultPlacements(state);
+    expect(state.raft.placements.net?.kind).toBe('edge');
+    expect(state.raft.placements.purifier?.kind).toBe('tile');
+    const again = structuredClone(state);
+    again.raft.placements = {};
+    assignDefaultPlacements(again);
+    expect(again.raft.placements).toEqual(state.raft.placements);
+  });
+
+  it('clears stale events and backfills placements when loading old v2 saves', () => {
+    const old = createInitialGame('guest-old-event', 42);
+    old.event = { id: 'stale', kind: 'drone', createdAt: 0, expiresAt: 10 };
+    old.raft.modules.deck = true;
+    old.raft.size = 3;
+    old.raft.modules.grill = true;
+    const migrated = migrateSave(old, 'fallback');
+    expect(migrated?.event).toBeNull();
+    expect(migrated?.raft.placements.grill?.kind).toBe('tile');
+  });
+
   it('repairs structural damage using wood and improves with hull research', () => {
     const state = createInitialGame('guest-test', 42);
     state.raft.integrity = 40;
@@ -204,24 +347,59 @@ describe('Tide After game engine', () => {
     expect(setRoute(state, 'safe').world.route).toBe('safe');
   });
 
-  it('automates water, cooking, gardening and net collection', () => {
+  it('automates water, cooking, gardening and net collection within its radius', () => {
     const state = createInitialGame('guest-test', 42);
     state.progress.tutorial.completed = true;
     state.raft.modules.net = true;
     state.raft.modules.purifier = true;
     state.raft.modules.grill = true;
     state.raft.modules.garden = true;
+    state.raft.placements.net = { kind: 'edge', side: 'south', index: 0 };
     state.inventory.fish = 1;
     state.world.nextNetAt = 0;
     state.world.nextWaterAt = 0;
     state.world.nextCookAt = 0;
     state.world.nextGardenAt = 0;
-    const debrisBefore = state.debris.length;
+    const netOrigin = getNetCollectOrigin(state) ?? { x: WORLD.centerX, y: WORLD.centerY };
+    state.debris = [
+      { ...state.debris[0], id: 'net-in-range', type: 'wood', x: netOrigin.x, y: netOrigin.y, vx: 0, vy: 0, ttl: 60 },
+      { ...state.debris[0], id: 'net-far-away', type: 'wood', x: netOrigin.x - 400, y: netOrigin.y - 320, vx: 0, vy: 0, ttl: 60 },
+    ];
     const next = tickGame(state, 0.5);
     expect(next.inventory.water).toBe(1);
     expect(next.inventory.meal).toBe(2);
     expect(next.inventory.fish).toBe(0);
-    expect(next.debris.length).toBeLessThan(debrisBefore);
+    expect(next.debris.some((item) => item.id === 'net-in-range')).toBe(false);
+    // 范围外的漂浮物不会被收集网跨图领取。
+    expect(next.debris.some((item) => item.id === 'net-far-away')).toBe(true);
+  });
+
+  it('collects with the net strictly inside the 150px projected radius', () => {
+    const state = createInitialGame('guest-net-range', 42);
+    state.progress.tutorial.completed = true;
+    state.raft.modules.net = true;
+    state.raft.placements.net = { kind: 'edge', side: 'south', index: 0 };
+    state.world.nextNetAt = 0;
+    const origin = getNetCollectOrigin(state);
+    expect(origin).not.toBeNull();
+    const near = { ...state.debris[0], id: 'near', x: origin!.x, y: origin!.y, vx: 0, vy: 0, ttl: 60 };
+    const far = { ...state.debris[0], id: 'far', x: origin!.x + 260, y: origin!.y + 200, vx: 0, vy: 0, ttl: 60 };    state.debris = [far, near];
+    const next = tickGame(state, 0.5);
+    expect(projectedDistance(far, origin!)).toBeGreaterThan(PLACEMENT.netCollectRadius);
+    expect(next.debris.some((item) => item.id === 'near')).toBe(false);
+    expect(next.debris.some((item) => item.id === 'far')).toBe(true);
+  });
+
+  it('stops generating random ocean events and clears stale ones on tick', () => {
+    const state = createInitialGame('guest-no-events', 42);
+    state.world.nextEventAt = 0;
+    let current = state;
+    for (let index = 0; index < 120; index += 1) {
+      current = tickGame(current, 1);
+    }
+    expect(current.event).toBeNull();
+    current.event = { id: 'stale', kind: 'storm', createdAt: 0, expiresAt: 5 };
+    expect(tickGame(current, 1).event).toBeNull();
   });
 
   it('resolves risk-reward ocean events exactly once', () => {
