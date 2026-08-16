@@ -35,6 +35,37 @@ for (const file of await walk(root)) {
   }
 }
 
+const fishermanAtlas = path.join(root, 'assets', 'tide-original', 'fisherman-motion.png')
+const atlas = await readFile(fishermanAtlas)
+const pngSignature = '89504e470d0a1a0a'
+const width = atlas.readUInt32BE(16)
+const height = atlas.readUInt32BE(20)
+const colorType = atlas[25]
+if (atlas.subarray(0, 8).toString('hex') !== pngSignature) {
+  violations.push('fisherman-motion.png (invalid PNG signature)')
+}
+if (width !== 512 || height !== 512) {
+  violations.push(`fisherman-motion.png (expected 512x512, received ${width}x${height})`)
+}
+if (colorType !== 6) {
+  violations.push(`fisherman-motion.png (expected RGBA color type 6, received ${colorType})`)
+}
+
+const combatAtlasPath = path.join(root, 'assets', 'tide-original', 'tide-combat-atlas.png')
+const combatAtlas = await readFile(combatAtlasPath)
+const combatWidth = combatAtlas.readUInt32BE(16)
+const combatHeight = combatAtlas.readUInt32BE(20)
+const combatColorType = combatAtlas[25]
+if (combatAtlas.subarray(0, 8).toString('hex') !== pngSignature) {
+  violations.push('tide-combat-atlas.png (invalid PNG signature)')
+}
+if (combatWidth !== 640 || combatHeight !== 256) {
+  violations.push(`tide-combat-atlas.png (expected 640x256, received ${combatWidth}x${combatHeight})`)
+}
+if (combatColorType !== 6) {
+  violations.push(`tide-combat-atlas.png (expected RGBA color type 6, received ${combatColorType})`)
+}
+
 if (violations.length) {
   console.error('Reference-only material leaked into dist:')
   violations.forEach((violation) => console.error('- ' + violation))

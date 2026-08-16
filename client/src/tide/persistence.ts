@@ -58,9 +58,29 @@ const isValidSave = (value: unknown): value is TideGameState => {
     Array.isArray(candidate.debris);
 };
 
+const normalizeV2Save = (value: TideGameState): TideGameState => {
+  const fresh = createInitialGame(value.guestId, value.world.seed);
+  return {
+    ...value,
+    equipment: value.equipment ?? fresh.equipment,
+    world: {
+      ...value.world,
+      nextEnemyAt: value.world.nextEnemyAt ?? value.world.elapsedSeconds + 5,
+    },
+    progress: {
+      ...value.progress,
+      stats: {
+        ...value.progress.stats,
+        enemiesDefeated: value.progress.stats.enemiesDefeated ?? 0,
+      },
+    },
+    enemies: Array.isArray(value.enemies) ? value.enemies : [],
+  };
+};
+
 export const migrateSave = (value: unknown, fallbackGuestId: string): TideGameState | null => {
   if (!value || typeof value !== 'object') return null;
-  if (isValidSave(value)) return value;
+  if (isValidSave(value)) return normalizeV2Save(value);
 
   const legacy = value as LegacySave;
   if (legacy.schemaVersion !== 1 || !legacy.player || !legacy.inventory || !legacy.raft || !legacy.world) {

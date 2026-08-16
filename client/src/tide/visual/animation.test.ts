@@ -5,20 +5,21 @@ import {
   createActionVisualState,
   createIdleVisualState,
   getActionProgress,
+  getFishingTransition,
   isMovementLocked,
 } from './animation';
 import { resolveAssetSelection } from './assets';
 
 describe('瞬时动作控制', () => {
   it('同级连点不会中断当前动作，受伤可以立即中断', () => {
-    const current = createActionVisualState('build', 'down', 100, { commitToken: 'build-1' });
+    const current = createActionVisualState('build', 'south', 100, { commitToken: 'build-1' });
     expect(canInterruptAction(current, 'build', 180)).toBe(false);
     expect(canInterruptAction(current, 'hookCast', 180)).toBe(false);
     expect(canInterruptAction(current, 'hurt', 180)).toBe(true);
   });
 
   it('关键帧只允许同一个 commitToken 提交一次', () => {
-    const state = createActionVisualState('hookCast', 'right', 0, { commitToken: 'hook-1' });
+    const state = createActionVisualState('hookCast', 'east', 0, { commitToken: 'hook-1' });
     const gate = new ActionCommitGate();
     expect(gate.shouldCommit(state, 300)).toBe(false);
     expect(gate.shouldCommit(state, 600)).toBe(true);
@@ -27,7 +28,7 @@ describe('瞬时动作控制', () => {
   });
 
   it('动作进度、移动锁和结束后的中断规则正确', () => {
-    const hook = createActionVisualState('hookCast', 'left', 1_000);
+    const hook = createActionVisualState('hookCast', 'west', 1_000);
     expect(getActionProgress(hook, 1_380)).toBeCloseTo(0.5, 2);
     expect(isMovementLocked(hook, 1_200)).toBe(true);
     expect(isMovementLocked(hook, 2_000)).toBe(false);
@@ -35,8 +36,17 @@ describe('瞬时动作控制', () => {
   });
 
   it('待机不会锁移动', () => {
-    const idle = createIdleVisualState('up', 0);
+    const idle = createIdleVisualState('north', 0);
     expect(isMovementLocked(idle, 5_000)).toBe(false);
+  });
+
+  it('攻击锁定移动并且伤害关键帧只提交一次', () => {
+    const attack = createActionVisualState('attack', 'southEast', 0, { commitToken: 'attack-1' });
+    const gate = new ActionCommitGate();
+    expect(isMovementLocked(attack, 100)).toBe(true);
+    expect(gate.shouldCommit(attack, 180)).toBe(false);
+    expect(gate.shouldCommit(attack, 220)).toBe(true);
+    expect(gate.shouldCommit(attack, 400)).toBe(false);
   });
 
   it('参考素材缺失时回退原创模式', () => {
@@ -44,5 +54,15 @@ describe('瞬时动作控制', () => {
     expect(resolveAssetSelection('reference', true)).toBe('reference');
     expect(resolveAssetSelection('original', true)).toBe('original');
     vi.restoreAllMocks();
+  });
+});
+
+describe('fishing visual sequence', () => {
+  it('advances once through cast, wait and reel boundaries', () => {
+    expect(getFishingTransition('idle', false)).toBe('fishCast');
+    expect(getFishingTransition('fishCast', false)).toBeNull();
+    expect(getFishingTransition('fishWait', true)).toBe('fishReel');
+    expect(getFishingTransition('fishReel', true)).toBeNull();
+    expect(getFishingTransition('idle', false)).toBe('fishCast');
   });
 });

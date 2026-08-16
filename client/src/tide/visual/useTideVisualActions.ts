@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState, type MutableRefObject } from 'react';
+import { COMBAT, WORLD } from '../config';
 import type { ConsumableId, RaftModuleId, TideGameState } from '../types';
 import {
   ACTION_SPECS,
@@ -6,9 +7,15 @@ import {
   canInterruptAction,
   createActionVisualState,
   createIdleVisualState,
+  getFishingTransition,
 } from './animation';
-import type { PlayerAction, PlayerVisualState, VisualEffect } from './types';
-import { directionFromDelta } from './utilities';
+import { clampFishingTarget, projectWorldPoint, projectedDistance, unprojectScreenPoint } from './projection';
+import type { MovementIntent, PlayerAction, PlayerVisualState, VisualEffect } from './types';
+import {
+  directionFromDelta,
+  visualDirectionFromLegacy,
+  visualDirectionVector,
+} from './utilities';
 
 interface GameActions {
   collect: (id?: string) => void;
@@ -16,6 +23,7 @@ interface GameActions {
   consume: (resource: ConsumableId) => void;
   build: (moduleId: RaftModuleId) => void;
   repair: () => void;
+  attack: (enemyId?: string) => void;
   setMovementLocked: (locked: boolean) => void;
 }
 
@@ -31,9 +39,10 @@ const makeToken = (action: PlayerAction) =>
 export const useTideVisualActions = (
   state: TideGameState,
   actions: GameActions,
+  movementIntentRef: MutableRefObject<MovementIntent>,
 ) => {
   const [visual, setVisual] = useState<PlayerVisualState>(
-    () => createIdleVisualState(state.player.facing, performance.now()),
+    () => createIdleVisualState(visualDirectionFromLegacy(state.player.facing), performance.now()),
   );
   const [feedback, setFeedback] = useState<string | null>(null);
   const visualRef = useRef(visual);
@@ -90,9 +99,15 @@ export const useTideVisualActions = (
 
     clearTimers();
     const player = stateRef.current.player;
-    const direction = options.target
-      ? directionFromDelta(options.target.x - player.x, options.target.y - player.y, player.facing)
-      : player.facing;
+    const projectedPlayer = projectWorldPoint(player);
+    const projectedTarget = options.target ? projectWorldPoint(options.target) : null;
+    const direction = projectedTarget
+      ? directionFromDelta(
+          projectedTarget.x - projectedPlayer.x,
+          projectedTarget.y - projectedPlayer.y,
+          movementIntentRef.current.direction,
+        )
+      : movementIntentRef.current.direction;
     const token = ACTION_SPECS[action].commitAt === null ? undefined : makeToken(action);
     const next = createActionVisualState(action, direction, now, {
       target: options.target,
@@ -131,18 +146,20 @@ export const useTideVisualActions = (
         visualRef.current = chained;
         setVisual(chained);
         actionsRef.current.setMovementLocked(ACTION_SPECS[options.after].locksMovement);
-        const chainTimer = window.setTimeout(
-          () => settleIdle(direction),
-          ACTION_SPECS[options.after].duration,
-        );
-        timersRef.current.push(chainTimer);
+        if (Number.isFinite(ACTION_SPECS[options.after].duration)) {
+          const chainTimer = window.setTimeout(
+            () => settleIdle(direction),
+            ACTION_SPECS[options.after].duration,
+          );
+          timersRef.current.push(chainTimer);
+        }
       } else {
         settleIdle(direction);
       }
     }, next.duration);
     timersRef.current.push(finishTimer);
     return true;
-  }, [clearTimers, pushEffect, settleIdle]);
+  }, [clearTimers, movementIntentRef, pushEffect, settleIdle]);
 
   const invalid = useCallback((message: string) => {
     setFeedback(message);
@@ -155,7 +172,7 @@ export const useTideVisualActions = (
     const targetId = id ?? current.debris
       .map((item) => ({
         id: item.id,
-        distance: Math.hypot(item.x - current.player.x, item.y - current.player.y),
+        distance: projectedDistance(item, current.player),
       }))
       .sort((a, b) => a.distance - b.distance)[0]?.id;
     const target = current.debris.find((item) => item.id === targetId);
@@ -163,8 +180,9 @@ export const useTideVisualActions = (
       invalid('附近没有可打捞物');
       return false;
     }
-    const distance = Math.hypot(target.x - current.player.x, target.y - current.player.y);
-    if (distance > 206) {
+    const distance = projectedDistance(target, current.player);
+    const range = WORLD.collectRange + current.progress.perks.hook * 28;
+    if (distance > range) {
       invalid('目标超出钩索范围，先靠近一点');
       return false;
     }
@@ -175,22 +193,29 @@ export const useTideVisualActions = (
     });
   }, [invalid, run]);
 
-  const fish = useCallback(() => {
+  const fish = useCallback((requestedTarget?: { x: number; y: number }) => {
     const current = stateRef.current;
-    const distance = 118;
-    const offset = {
-      up: [0, -distance],
-      down: [0, distance],
-      left: [-distance, 0],
-      right: [distance, 0],
-    }[current.player.facing];
-    const target = { x: current.player.x + offset[0], y: current.player.y + offset[1] };
-    const action: PlayerAction = current.fishing.active ? 'fishReel' : 'fishCast';
-    return run(action, {
+    const transition = getFishingTransition(visualRef.current.action, current.fishing.active);
+    if (!transition) return false;
+    if (transition === 'fishReel') {
+      return run('fishReel', {
+        target: visualRef.current.target,
+        commit: () => actionsRef.current.fish(),
+      });
+    }
+    const playerScreen = projectWorldPoint(current.player);
+    const vector = visualDirectionVector(movementIntentRef.current.direction);
+    const fallback = unprojectScreenPoint({
+      x: playerScreen.x + vector.x * 132,
+      y: playerScreen.y + vector.y * 132,
+    });
+    const target = clampFishingTarget(current.player, requestedTarget ?? fallback);
+    return run('fishCast', {
       target,
       commit: () => actionsRef.current.fish(),
+      after: 'fishWait',
     });
-  }, [run]);
+  }, [movementIntentRef, run]);
 
   const build = useCallback((moduleId: RaftModuleId) => {
     return run('build', {
@@ -210,6 +235,50 @@ export const useTideVisualActions = (
     })
   ), [run]);
 
+  const attack = useCallback((enemyId?: string, requestedTarget?: { x: number; y: number }) => {
+    const current = stateRef.current;
+    const enemy = enemyId
+      ? current.enemies.find((candidate) => candidate.id === enemyId)
+      : current.enemies
+          .filter((candidate) => candidate.phase === 'boarding' || candidate.phase === 'deck')
+          .map((candidate) => ({
+            enemy: candidate,
+            distance: projectedDistance(candidate, current.player),
+          }))
+          .filter((candidate) => candidate.distance <= COMBAT.cutlassRange)
+          .sort((a, b) => a.distance - b.distance)[0]?.enemy;
+    const playerScreen = projectWorldPoint(current.player);
+    const vector = visualDirectionVector(movementIntentRef.current.direction);
+    const fallback = unprojectScreenPoint({
+      x: playerScreen.x + vector.x * 84,
+      y: playerScreen.y + vector.y * 84,
+    });
+    const target = enemy ?? requestedTarget ?? fallback;
+    if (enemy && projectedDistance(enemy, current.player) > COMBAT.cutlassRange) {
+      invalid('目标超出弯刀攻击范围');
+      return false;
+    }
+    const lethal = Boolean(enemy && enemy.health <= COMBAT.cutlassDamage);
+    return run('attack', {
+      target,
+      commit: enemy ? () => {
+        actionsRef.current.attack(enemy.id);
+        pushEffect({ kind: 'spark', x: enemy.x, y: enemy.y, duration: 420, tone: '#f2d777' });
+        if (lethal) {
+          pushEffect({
+            kind: 'loot',
+            x: enemy.x,
+            y: enemy.y,
+            targetX: 480,
+            targetY: 524,
+            duration: 720,
+            tone: enemy.type === 'lanternBeast' ? '#62e5db' : '#dc8f58',
+          });
+        }
+      } : undefined,
+    });
+  }, [invalid, movementIntentRef, pushEffect, run]);
+
   useEffect(() => {
     if (state.player.health < previousHealth.current) {
       run('hurt');
@@ -227,7 +296,7 @@ export const useTideVisualActions = (
     visualRef,
     effectsRef,
     feedback,
-    busy: visual.action !== 'idle' && visual.action !== 'walk',
-    actions: { collect, fish, build, consume, repair },
+    busy: visual.action !== 'idle' && visual.action !== 'walk' && visual.action !== 'fishWait',
+    actions: { collect, fish, build, consume, repair, attack, invalid },
   };
 };

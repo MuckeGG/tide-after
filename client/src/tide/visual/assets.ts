@@ -1,9 +1,10 @@
 import type { LoadedTideAssets, TideAssetMode } from './types';
 
 export const ORIGINAL_ASSET_MANIFEST = {
-  diver: '/assets/tide-original/diver-directions.png',
-  portrait: '/assets/tide-original/diver-portrait.png',
+  character: '/assets/tide-original/fisherman-motion.png',
+  portrait: '/assets/tide-original/fisherman-portrait.png',
   icons: '/assets/tide-original/tide-icon-atlas.png',
+  combat: '/assets/tide-original/tide-combat-atlas.png',
 } as const;
 
 export const REFERENCE_ASSET_MANIFEST = {
@@ -28,7 +29,10 @@ const loadImage = (source: string) => new Promise<HTMLImageElement>((resolve, re
 });
 
 export const loadTideVisualAssets = async (): Promise<LoadedTideAssets> => {
-  const diver = await loadImage(ORIGINAL_ASSET_MANIFEST.diver).catch(() => null);
+  const [character, combat] = await Promise.all([
+    loadImage(ORIGINAL_ASSET_MANIFEST.character).catch(() => null),
+    loadImage(ORIGINAL_ASSET_MANIFEST.combat).catch(() => null),
+  ]);
   const requested: TideAssetMode = __TIDE_ART_MODE__;
 
   if (requested === 'reference') {
@@ -40,10 +44,11 @@ export const loadTideVisualAssets = async (): Promise<LoadedTideAssets> => {
     if (reference) {
       return {
         mode: 'reference',
-        diver,
+        character,
         woodTile: reference[0],
         platformEdge: reference[1],
         slotFrame: reference[2],
+        combat,
       };
     }
     if (!fallbackWarningShown) {
@@ -52,5 +57,5 @@ export const loadTideVisualAssets = async (): Promise<LoadedTideAssets> => {
     }
   }
 
-  return { mode: 'original', diver, woodTile: null, platformEdge: null, slotFrame: null };
+  return { mode: 'original', character, woodTile: null, platformEdge: null, slotFrame: null, combat };
 };

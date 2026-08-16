@@ -12,6 +12,9 @@ export type ConsumableId = 'fish' | 'meal' | 'water';
 export type Weather = 'clear' | 'cloudy' | 'storm';
 export type RouteMode = 'salvage' | 'fishing' | 'safe';
 export type DebrisType = 'wood' | 'plastic' | 'scrap' | 'fiber' | 'crate';
+export type EquipmentId = 'cutlass' | 'salvageTool' | 'fishingRod';
+export type EnemyType = 'tideCrab' | 'lanternBeast';
+export type EnemyPhase = 'swimming' | 'boarding' | 'deck';
 
 export type RaftModuleId =
   | 'deck'
@@ -68,6 +71,26 @@ export interface DebrisItem {
   ttl: number;
 }
 
+export interface EnemyState {
+  id: string;
+  type: EnemyType;
+  phase: EnemyPhase;
+  x: number;
+  y: number;
+  targetX: number;
+  targetY: number;
+  health: number;
+  maxHealth: number;
+  spawnedAt: number;
+  phaseEndsAt: number;
+  nextAttackAt: number;
+}
+
+export interface EquipmentState {
+  selected: EquipmentId;
+  nextAttackAt: number;
+}
+
 export interface FishingState {
   active: boolean;
   marker: number;
@@ -96,6 +119,7 @@ export interface WorldState {
   nextGardenAt: number;
   nextStormHitAt: number;
   nextEventAt: number;
+  nextEnemyAt: number;
 }
 
 export interface GameNotice {
@@ -115,6 +139,7 @@ export interface RunStats {
   stormHits: number;
   distanceMoved: number;
   survivedSeconds: number;
+  enemiesDefeated: number;
 }
 
 export interface TutorialState {
@@ -168,10 +193,12 @@ export interface TideGameState {
   updatedAt: number;
   player: PlayerState;
   inventory: Inventory;
+  equipment: EquipmentState;
   raft: RaftState;
   world: WorldState;
   progress: ProgressState;
   debris: DebrisItem[];
+  enemies: EnemyState[];
   fishing: FishingState;
   event: OceanEvent | null;
   rngStep: number;

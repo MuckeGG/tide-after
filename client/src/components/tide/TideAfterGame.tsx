@@ -10,6 +10,7 @@ import {
 import {
   ACHIEVEMENTS,
   CHAPTERS,
+  EQUIPMENT_LABELS,
   PERKS,
   RESOURCE_LABELS,
   ROUTE_LABELS,
@@ -27,6 +28,7 @@ import {
 import { getPrimaryAction } from '../../tide/guidance';
 import type {
   PerkId,
+  EquipmentId,
   RaftModuleId,
   ResourceId,
   RouteMode,
@@ -34,6 +36,13 @@ import type {
 } from '../../tide/types';
 import { useTideGame } from '../../tide/useTideGame';
 import { loadTideVisualAssets } from '../../tide/visual/assets';
+import { PointerActionGate } from '../../tide/visual/inputGate';
+import {
+  isScreenPointOnRaft,
+  projectWorldPoint,
+  projectedDistance,
+  unprojectScreenPoint,
+} from '../../tide/visual/projection';
 import {
   createTideRendererMemory,
   renderTideScene,
@@ -41,6 +50,7 @@ import {
 } from '../../tide/visual/renderer';
 import type {
   LoadedTideAssets,
+  MovementIntent,
   PlayerVisualState,
   VisualEffect,
 } from '../../tide/visual/types';
@@ -68,10 +78,11 @@ type PanelTab = (typeof PANEL_TABS)[number]['id'];
 
 const EMPTY_ASSETS: LoadedTideAssets = {
   mode: 'original',
-  diver: null,
+  character: null,
   woodTile: null,
   platformEdge: null,
   slotFrame: null,
+  combat: null,
 };
 
 const clamp = (value: number, min: number, max: number) =>
@@ -94,18 +105,27 @@ const formatDuration = (seconds: number) => {
 function OceanCanvas({
   state,
   visualRef,
+  movementIntentRef,
   effectsRef,
-  onCollect,
+  onSceneAction,
 }: {
   state: TideGameState;
   visualRef: MutableRefObject<PlayerVisualState>;
+  movementIntentRef: MutableRefObject<MovementIntent>;
   effectsRef: MutableRefObject<VisualEffect[]>;
-  onCollect: (id?: string) => boolean;
+  onSceneAction: (action: {
+    kind: 'collect' | 'fish' | 'attack' | 'repair' | 'invalid';
+    target: { x: number; y: number };
+    debrisId?: string;
+    enemyId?: string;
+    pointerToken: string;
+  }) => void;
 }) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const stateRef = useRef(state);
   const assetsRef = useRef<LoadedTideAssets>(EMPTY_ASSETS);
   const memoryRef = useRef<TideRendererMemory | null>(null);
+  const pointerGateRef = useRef(new PointerActionGate());
 
   useEffect(() => {
     stateRef.current = state;
@@ -139,6 +159,7 @@ function OceanCanvas({
         visualRef.current,
         assetsRef.current,
         effectsRef.current,
+        movementIntentRef.current,
         now,
         memory,
       );
@@ -147,6 +168,7 @@ function OceanCanvas({
         canvas.dataset.fps = String(Math.round(frames * 1_000 / (now - sampledAt)));
         canvas.dataset.particles = String(memory.particles.length);
         canvas.dataset.assetMode = assetsRef.current.mode;
+        canvas.dataset.direction = movementIntentRef.current.direction;
         frames = 0;
         sampledAt = now;
       }
@@ -154,11 +176,23 @@ function OceanCanvas({
     };
     frame = window.requestAnimationFrame(render);
     return () => window.cancelAnimationFrame(frame);
-  }, [effectsRef, visualRef]);
+  }, [effectsRef, movementIntentRef, visualRef]);
 
   const onPointerDown = (event: ReactPointerEvent<HTMLCanvasElement>) => {
+    const pointerToken = pointerGateRef.current.begin(
+      event.pointerId,
+      event.button,
+      event.isPrimary,
+      event.timeStamp,
+    );
+    if (!pointerToken) return;
     const canvas = canvasRef.current;
     if (!canvas) return;
+    try {
+      event.currentTarget.setPointerCapture(event.pointerId);
+    } catch {
+      // Keep scene actions usable in browsers that decline pointer capture.
+    }
     const bounds = canvas.getBoundingClientRect();
     const scale = Math.max(bounds.width / WORLD.width, bounds.height / WORLD.height);
     const renderedWidth = WORLD.width * scale;
@@ -167,10 +201,56 @@ function OceanCanvas({
     const offsetY = (bounds.height - renderedHeight) / 2;
     const x = (event.clientX - bounds.left - offsetX) / scale;
     const y = (event.clientY - bounds.top - offsetY) / scale;
+    const logicalTarget = unprojectScreenPoint({ x, y });
+    if (state.fishing.active || visualRef.current.action === 'fishWait') {
+      onSceneAction({ kind: 'fish', target: logicalTarget, pointerToken });
+      return;
+    }
+    if (state.equipment.selected === 'cutlass') {
+      const enemyTarget = state.enemies
+        .filter((enemy) => enemy.phase === 'boarding' || enemy.phase === 'deck')
+        .map((enemy) => {
+          const projected = projectWorldPoint(enemy);
+          return { enemy, distance: Math.hypot(projected.x - x, projected.y - y) };
+        })
+        .sort((a, b) => a.distance - b.distance)[0];
+      onSceneAction({
+        kind: 'attack',
+        target: logicalTarget,
+        enemyId: enemyTarget && enemyTarget.distance < (enemyTarget.enemy.type === 'lanternBeast' ? 58 : 46)
+          ? enemyTarget.enemy.id
+          : undefined,
+        pointerToken,
+      });
+      return;
+    }
     const target = state.debris
-      .map((item) => ({ item, distance: Math.hypot(item.x - x, item.y - y) }))
+      .map((item) => {
+        const projected = projectWorldPoint(item);
+        return { item, distance: Math.hypot(projected.x - x, projected.y - y) };
+      })
       .sort((a, b) => a.distance - b.distance)[0];
-    if (target && target.distance < 96) onCollect(target.item.id);
+    if (state.equipment.selected === 'salvageTool' && target && target.distance < 48) {
+      onSceneAction({ kind: 'collect', target: logicalTarget, debrisId: target.item.id, pointerToken });
+      return;
+    }
+    if (isScreenPointOnRaft({ x, y }, state.raft.size)) {
+      onSceneAction({
+        kind: state.equipment.selected === 'salvageTool' && state.raft.integrity < 100 ? 'repair' : 'invalid',
+        target: logicalTarget,
+        pointerToken,
+      });
+      return;
+    }
+    onSceneAction({
+      kind: state.equipment.selected === 'fishingRod' ? 'fish' : 'invalid',
+      target: logicalTarget,
+      pointerToken,
+    });
+  };
+
+  const releasePointer = (event: ReactPointerEvent<HTMLCanvasElement>) => {
+    pointerGateRef.current.end(event.pointerId);
   };
 
   return (
@@ -180,7 +260,10 @@ function OceanCanvas({
       width={WORLD.width}
       height={WORLD.height}
       onPointerDown={onPointerDown}
-      aria-label="俯视角海上木筏场景，点击漂浮物可自动锁定打捞"
+      onPointerUp={releasePointer}
+      onPointerCancel={releasePointer}
+      onLostPointerCapture={releasePointer}
+      aria-label="2:1 等距海上木筏场景，点击漂浮物可自动锁定打捞"
     />
   );
 }
@@ -399,7 +482,7 @@ function Hotbar({
 
   return (
     <div className="hotbar" aria-label="资源快捷栏">
-      {(Object.keys(state.inventory) as ResourceId[]).map((resource, index) => {
+      {(Object.keys(state.inventory) as ResourceId[]).map((resource) => {
         const consumable = resource === 'fish' || resource === 'meal' || resource === 'water';
         return (
           <button
@@ -412,7 +495,6 @@ function Hotbar({
             }}
             title={consumable ? '点击使用' : RESOURCE_LABELS[resource]}
           >
-            <small>{index + 1}</small>
             <span className={'resource-icon resource-icon--' + resource} />
             <strong>{state.inventory[resource]}</strong>
             <em>{RESOURCE_LABELS[resource]}</em>
@@ -423,9 +505,46 @@ function Hotbar({
   );
 }
 
+const EQUIPMENT_ORDER: EquipmentId[] = ['cutlass', 'salvageTool', 'fishingRod'];
+
+function EquipmentBar({
+  state,
+  select,
+  busy,
+}: {
+  state: TideGameState;
+  select: (equipment: EquipmentId) => void;
+  busy: boolean;
+}) {
+  const cooldown = state.equipment.selected === 'cutlass'
+    ? Math.max(0, state.equipment.nextAttackAt - state.world.elapsedSeconds) / 0.46
+    : 0;
+  return (
+    <div className="equipment-bar" aria-label="装备栏">
+      {EQUIPMENT_ORDER.map((equipment, index) => (
+        <button
+          type="button"
+          key={equipment}
+          className={state.equipment.selected === equipment ? 'is-selected' : ''}
+          onClick={() => select(equipment)}
+          title={EQUIPMENT_LABELS[equipment].hint}
+          aria-pressed={state.equipment.selected === equipment}
+        >
+          <kbd>{index + 1}</kbd>
+          <span className={'equipment-icon equipment-icon--' + equipment} />
+          <strong>{EQUIPMENT_LABELS[equipment].name}</strong>
+          {state.equipment.selected === equipment && (busy || cooldown > 0) && (
+            <i style={{ transform: `scaleY(${Math.min(1, busy ? 1 : cooldown)})` }} />
+          )}
+        </button>
+      ))}
+    </div>
+  );
+}
+
 function TideAfterGame() {
-  const { state, hadSave, lastSavedAt, cloudStatus, actions } = useTideGame();
-  const visual = useTideVisualActions(state, actions);
+  const { state, hadSave, lastSavedAt, cloudStatus, movementIntentRef, actions } = useTideGame();
+  const visual = useTideVisualActions(state, actions, movementIntentRef);
   const [showIntro, setShowIntro] = useState(true);
   const [confirmRestart, setConfirmRestart] = useState(false);
   const [drawerOpen, setDrawerOpen] = useState(false);
@@ -434,6 +553,9 @@ function TideAfterGame() {
   const stormWarning = getStormWarningSeconds(state);
   const xpNeeded = getXpToNext(state.progress.level);
   const cloudConnected = cloudStatus === 'connected';
+  const selectEquipment = actions.selectEquipment;
+  const nightThreat = state.world.day >= 2
+    && (state.world.timeOfDay >= 0.7 || state.world.timeOfDay < 0.14);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -448,10 +570,14 @@ function TideAfterGame() {
         visual.actions.fish();
         event.preventDefault();
       }
+      if (!event.repeat && (key === '1' || key === '2' || key === '3')) {
+        selectEquipment(EQUIPMENT_ORDER[Number(key) - 1]);
+        event.preventDefault();
+      }
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [visual.actions]);
+  }, [selectEquipment, visual.actions]);
 
   const openDrawer = useCallback((tab: PanelTab) => {
     setActiveTab(tab);
@@ -470,28 +596,40 @@ function TideAfterGame() {
     x: number,
     y: number,
   ) => {
-    event.currentTarget.setPointerCapture(event.pointerId);
+    try {
+      event.currentTarget.setPointerCapture(event.pointerId);
+    } catch {
+      // Synthetic pointers may not own capture; movement still remains valid.
+    }
     actions.startMove(x, y);
   };
   const stopMove = () => actions.stopMove();
 
   const contextAction = () => {
     if (state.fishing.active) return visual.actions.fish();
+    if (state.equipment.selected === 'cutlass') return visual.actions.attack();
+    if (state.equipment.selected === 'fishingRod') return visual.actions.fish();
     const nearest = state.debris
       .map((item) => ({
         item,
-        distance: Math.hypot(item.x - state.player.x, item.y - state.player.y),
+        distance: projectedDistance(item, state.player),
       }))
       .sort((a, b) => a.distance - b.distance)[0];
-    if (nearest && nearest.distance <= 206) return visual.actions.collect(nearest.item.id);
+    const collectRange = WORLD.collectRange + state.progress.perks.hook * 28;
+    if (nearest && nearest.distance <= collectRange) return visual.actions.collect(nearest.item.id);
     if (state.player.thirst < 50 && state.inventory.water > 0) return visual.actions.consume('water');
     if (state.player.hunger < 50 && state.inventory.meal > 0) return visual.actions.consume('meal');
     if (state.player.hunger < 50 && state.inventory.fish > 0) return visual.actions.consume('fish');
-    return visual.actions.fish();
+    if (state.raft.integrity < 100) return visual.actions.repair();
+    return visual.actions.invalid('附近没有可打捞物');
   };
   const contextLabel = state.fishing.active
     ? '收线'
-    : state.debris.some((item) => Math.hypot(item.x - state.player.x, item.y - state.player.y) <= 206)
+    : state.equipment.selected === 'cutlass'
+      ? '攻击'
+      : state.equipment.selected === 'fishingRod'
+        ? '钓鱼'
+        : state.debris.some((item) => projectedDistance(item, state.player) <= WORLD.collectRange + state.progress.perks.hook * 28)
       ? '打捞'
       : state.player.thirst < 50 && state.inventory.water > 0
         ? '喝水'
@@ -501,15 +639,30 @@ function TideAfterGame() {
 
   return (
     <main
-      className={'tide-app tide-app--immersive weather--' + state.world.weather}
+      className={'tide-app tide-app--immersive weather--' + state.world.weather + (drawerOpen ? ' drawer-is-open' : '')}
       data-visual-action={visual.visual.action}
     >
       <section className="world-stage">
         <OceanCanvas
           state={state}
           visualRef={visual.visualRef}
+          movementIntentRef={movementIntentRef}
           effectsRef={visual.effectsRef}
-          onCollect={visual.actions.collect}
+          onSceneAction={(sceneAction) => {
+            if (sceneAction.kind === 'collect') {
+              visual.actions.collect(sceneAction.debrisId);
+            } else if (sceneAction.kind === 'fish') {
+              visual.actions.fish(sceneAction.target);
+            } else if (sceneAction.kind === 'attack') {
+              visual.actions.attack(sceneAction.enemyId, sceneAction.target);
+            } else if (sceneAction.kind === 'repair') {
+              visual.actions.repair();
+            } else {
+              visual.actions.invalid(state.equipment.selected === 'fishingRod'
+                ? '甲板上不能抛竿，请点击水面'
+                : '当前工具无法在这里使用');
+            }
+          }}
         />
 
         <header className="brand-chip">
@@ -519,7 +672,7 @@ function TideAfterGame() {
 
         <section className="survival-cluster" aria-label="生存状态">
           <header>
-            <span>潜水工 · LV.{state.progress.level.toString().padStart(2, '0')}</span>
+            <span>渔夫 · LV.{state.progress.level.toString().padStart(2, '0')}</span>
             <small>{state.progress.xp}/{xpNeeded} XP</small>
           </header>
           <MiniProgress value={state.progress.xp} max={xpNeeded} />
@@ -563,6 +716,10 @@ function TideAfterGame() {
             <strong>{Math.ceil(stormWarning)} 秒后抵达</strong>
             <small>维修、切换避风航线，或冒险留在残骸带</small>
           </div>
+        )}
+
+        {nightThreat && (
+          <div className="night-warning"><span>夜潮警戒</span><strong>海怪可能正在接近木筏</strong></div>
         )}
 
         {visual.feedback && <div className="action-feedback">{visual.feedback}</div>}
@@ -629,10 +786,11 @@ function TideAfterGame() {
 
         <div className="desktop-hints">
           <span><kbd>WASD</kbd> 移动</span>
-          <span><kbd>E</kbd> 打捞</span>
+          <span><kbd>1–3</kbd> 切换装备</span>
           <span><kbd>SPACE</kbd> 抛竿 / 收线</span>
         </div>
 
+        <EquipmentBar state={state} select={selectEquipment} busy={visual.busy} />
         <Hotbar state={state} consume={visual.actions.consume} />
 
         <div className="mobile-controls" aria-label="移动端控制">
@@ -672,7 +830,7 @@ function TideAfterGame() {
             >↓</button>
           </div>
           <div className={'action-wheel ' + (visual.busy ? 'is-busy' : '')}>
-            <button type="button" className="action-wheel__secondary" onClick={() => visual.actions.collect()}>钩</button>
+            <button type="button" className="action-wheel__secondary" onClick={() => selectEquipment('salvageTool')}>斧</button>
             <button
               type="button"
               className="action-wheel__main"
@@ -682,7 +840,7 @@ function TideAfterGame() {
               <span>{contextLabel}</span>
               <small>{visual.busy ? '动作中' : 'ACTION'}</small>
             </button>
-            <button type="button" className="action-wheel__secondary" onClick={visual.actions.fish}>竿</button>
+            <button type="button" className="action-wheel__secondary" onClick={() => selectEquipment('fishingRod')}>竿</button>
           </div>
         </div>
 
@@ -706,7 +864,7 @@ function TideAfterGame() {
               />
               <b style={{ left: state.fishing.marker + '%' }} />
             </div>
-            <button type="button" onClick={visual.actions.fish}>收线 · SPACE</button>
+            <button type="button" onClick={() => visual.actions.fish()}>收线 · SPACE</button>
           </div>
         )}
 
@@ -753,7 +911,7 @@ function TideAfterGame() {
               <h2>最后一块木筏，<br />和一个还没放弃的人。</h2>
               <p>打捞海上残骸，钓鱼维生，把 2×2 木筏建成能穿越风暴的家。首局只追踪一个当前目标，让每一步都清楚可见。</p>
               <div>
-                <span>厚重潜水工</span><span>2.5D 深度遮挡</span><span>完整交互动作</span>
+                <span>落魄渔夫大叔</span><span>2:1 等距木筏</span><span>八方向动作</span>
               </div>
               <button type="button" onClick={() => setShowIntro(false)}>
                 {hadSave ? '继续漂流' : '踏上木筏'}
@@ -765,8 +923,8 @@ function TideAfterGame() {
               )}
             </div>
             <div className="diver-portrait">
-              <img src="/assets/tide-original/diver-portrait.png" alt="原创厚重潜水工角色" />
-              <span>HEAVY SALVAGE SUIT · 07</span>
+              <img src="/assets/tide-original/fisherman-portrait.png" alt="原创落魄渔夫大叔角色" />
+              <span>TIDE FISHERMAN · 07</span>
             </div>
           </section>
         </div>

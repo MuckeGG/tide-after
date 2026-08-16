@@ -32,15 +32,47 @@ export const SURVIVAL = {
 } as const;
 
 export const SPAWNING = {
-  initialDebrisCount: 16,
-  baseIntervalSeconds: 2.65,
+  initialDebrisCount: 8,
+  maxDebrisCount: 18,
+  baseIntervalSeconds: 4.2,
   netIntervalSeconds: 11,
   purifierIntervalSeconds: 17,
   grillIntervalSeconds: 15,
   gardenIntervalSeconds: 42,
   stormHitIntervalSeconds: 12,
   eventIntervalSeconds: 48,
-  debrisLifetimeSeconds: 92,
+  debrisLifetimeSeconds: 55,
+  debrisMinSpeed: 18,
+  debrisMaxSpeed: 26,
+} as const;
+
+export const COMBAT = {
+  firstThreatDay: 2,
+  nightStart: 0.7,
+  dawnEnd: 0.14,
+  maxEnemies: 4,
+  firstSpawnDelaySeconds: 5,
+  spawnIntervalSeconds: 15,
+  stormSpawnMultiplier: 0.68,
+  eliteBaseChance: 0.08,
+  eliteStormChance: 0.3,
+  cutlassDamage: 34,
+  cutlassRange: 112,
+  attackCooldownSeconds: 0.46,
+  tideCrabHealth: 64,
+  tideCrabSpeed: 24,
+  tideCrabDamage: 6,
+  lanternBeastHealth: 150,
+  lanternBeastSpeed: 18,
+  lanternBeastDamage: 11,
+  enemyAttackRange: 43,
+  enemyAttackIntervalSeconds: 1.45,
+} as const;
+
+export const EQUIPMENT_LABELS = {
+  cutlass: { name: '水手弯刀', hint: '左键攻击登筏怪物' },
+  salvageTool: { name: '斧锤工具', hint: '左键维修甲板或打捞' },
+  fishingRod: { name: '旧式鱼竿', hint: '左键抛竿与收线' },
 } as const;
 
 export const STARTING_INVENTORY: Inventory = {

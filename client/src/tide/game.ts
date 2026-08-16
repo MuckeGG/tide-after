@@ -1,6 +1,7 @@
 import {
   ACHIEVEMENTS,
   CHAPTERS,
+  COMBAT,
   PERKS,
   RESOURCE_LABELS,
   SPAWNING,
@@ -16,6 +17,8 @@ import type {
   ContractObjective,
   DailyContract,
   DebrisItem,
+  EnemyState,
+  EquipmentId,
   EventKind,
   GameNotice,
   OceanEvent,
@@ -26,6 +29,13 @@ import type {
   TideGameState,
   Weather,
 } from './types';
+import {
+  projectWorldPoint,
+  projectWorldVector,
+  projectedDistance,
+  unprojectScreenPoint,
+  unprojectScreenVector,
+} from './visual/projection';
 
 const clamp = (value: number, min: number, max: number) =>
   Math.min(max, Math.max(min, value));
@@ -47,6 +57,7 @@ const cloneState = (state: TideGameState): TideGameState => ({
   ...state,
   player: { ...state.player },
   inventory: { ...state.inventory },
+  equipment: { ...state.equipment },
   raft: { ...state.raft, modules: { ...state.raft.modules } },
   world: { ...state.world },
   progress: {
@@ -59,6 +70,7 @@ const cloneState = (state: TideGameState): TideGameState => ({
     stats: { ...state.progress.stats },
   },
   debris: state.debris.map((item) => ({ ...item })),
+  enemies: state.enemies.map((enemy) => ({ ...enemy })),
   fishing: { ...state.fishing },
   event: state.event ? { ...state.event } : null,
   notices: [...state.notices],
@@ -113,24 +125,225 @@ const pickDebrisType = (roll: number, day: number): DebrisItem['type'] => {
   return 'crate';
 };
 
-const spawnDebris = (state: TideGameState, nearby = false, forcedType?: DebrisItem['type']) => {
+type DebrisSpawnMode = 'nearby' | 'midstream' | 'edge';
+
+const debrisCurrent = (state: TideGameState) => {
+  const seedLean = ((state.world.seed % 29) / 29 - 0.5) * 0.22;
+  const routeLean = state.world.route === 'fishing' ? -0.16 : state.world.route === 'safe' ? 0.08 : 0;
+  const angle = 0.23 + seedLean + routeLean;
+  return { x: Math.cos(angle), y: Math.sin(angle) };
+};
+
+const spawnDebris = (
+  state: TideGameState,
+  mode: DebrisSpawnMode = 'edge',
+  forcedType?: DebrisItem['type'],
+) => {
+  if (state.debris.length >= SPAWNING.maxDebrisCount) return false;
   const angle = takeRandom(state) * Math.PI * 2;
-  const radius = nearby ? 112 + takeRandom(state) * 120 : 350 + takeRandom(state) * 190;
-  const speed = 5 + takeRandom(state) * 8;
-  const tangent = (takeRandom(state) - 0.5) * 4;
+  const current = debrisCurrent(state);
+  const speed = SPAWNING.debrisMinSpeed
+    + takeRandom(state) * (SPAWNING.debrisMaxSpeed - SPAWNING.debrisMinSpeed);
+  const screenPosition = mode === 'nearby'
+    ? {
+        x: WORLD.centerX + Math.cos(angle) * (105 + takeRandom(state) * 58),
+        y: WORLD.centerY + Math.sin(angle) * (92 + takeRandom(state) * 48),
+      }
+    : mode === 'midstream'
+      ? {
+          x: 100 + takeRandom(state) * (WORLD.width - 200),
+          y: 80 + takeRandom(state) * (WORLD.height - 160),
+        }
+      : takeRandom(state) < 0.78
+        ? { x: -56, y: 48 + takeRandom(state) * (WORLD.height - 96) }
+        : { x: 48 + takeRandom(state) * (WORLD.width * 0.46), y: -48 };
+  const worldPosition = unprojectScreenPoint(screenPosition);
+  const jitter = (takeRandom(state) - 0.5) * 0.16;
+  const worldVelocity = unprojectScreenVector(
+    (current.x - current.y * jitter) * speed,
+    (current.y + current.x * jitter) * speed,
+  );
   const type = forcedType ?? pickDebrisType(takeRandom(state), state.world.day);
-  const x = WORLD.centerX + Math.cos(angle) * radius;
-  const y = WORLD.centerY + Math.sin(angle) * radius * 0.72;
 
   state.debris.push({
     id: makeId(type),
     type,
-    x,
-    y,
-    vx: -Math.cos(angle) * speed + tangent,
-    vy: -Math.sin(angle) * speed * 0.42 + tangent * 0.2,
+    x: worldPosition.x,
+    y: worldPosition.y,
+    vx: worldVelocity.x,
+    vy: worldVelocity.y,
     ttl: SPAWNING.debrisLifetimeSeconds,
   });
+  return true;
+};
+
+const advanceDebris = (item: DebrisItem, state: TideGameState, dt: number) => {
+  let screenVelocity = projectWorldVector(item.vx, item.vy);
+  const screenPosition = projectWorldPoint(item);
+  const halfRaft = state.raft.size * WORLD.tileSize / 2;
+  const insideSlipField = Math.abs(item.x - WORLD.centerX) < halfRaft + 26
+    && Math.abs(item.y - WORLD.centerY) < halfRaft + 26;
+  if (insideSlipField) {
+    const radialX = screenPosition.x - WORLD.centerX;
+    const radialY = screenPosition.y - WORLD.centerY;
+    const radialLength = Math.hypot(radialX, radialY) || 1;
+    let tangentX = -radialY / radialLength;
+    let tangentY = radialX / radialLength;
+    if (tangentX * screenVelocity.x + tangentY * screenVelocity.y < 0) {
+      tangentX *= -1;
+      tangentY *= -1;
+    }
+    const currentLength = Math.hypot(screenVelocity.x, screenVelocity.y) || 1;
+    screenVelocity = {
+      x: screenVelocity.x / currentLength * 0.38 + tangentX * 0.62,
+      y: screenVelocity.y / currentLength * 0.38 + tangentY * 0.62,
+    };
+    const blendedLength = Math.hypot(screenVelocity.x, screenVelocity.y) || 1;
+    const slipSpeed = Math.max(SPAWNING.debrisMinSpeed, currentLength);
+    screenVelocity.x = screenVelocity.x / blendedLength * slipSpeed;
+    screenVelocity.y = screenVelocity.y / blendedLength * slipSpeed;
+  }
+  const projectedSpeed = Math.hypot(screenVelocity.x, screenVelocity.y) || 1;
+  if (insideSlipField && projectedSpeed < 16) {
+    screenVelocity.x = screenVelocity.x / projectedSpeed * 16;
+    screenVelocity.y = screenVelocity.y / projectedSpeed * 16;
+  }
+  const worldVelocity = unprojectScreenVector(screenVelocity.x, screenVelocity.y);
+  let nextX = item.x + worldVelocity.x * dt;
+  let nextY = item.y + worldVelocity.y * dt;
+  const collisionHalf = halfRaft + 18;
+  const localX = nextX - WORLD.centerX;
+  const localY = nextY - WORLD.centerY;
+  if (Math.abs(localX) < collisionHalf && Math.abs(localY) < collisionHalf) {
+    const penetrationX = collisionHalf - Math.abs(localX);
+    const penetrationY = collisionHalf - Math.abs(localY);
+    if (penetrationX < penetrationY) {
+      const side = Math.sign(localX) || Math.sign(worldVelocity.x) || 1;
+      nextX = WORLD.centerX + side * collisionHalf;
+    } else {
+      const side = Math.sign(localY) || Math.sign(worldVelocity.y) || 1;
+      nextY = WORLD.centerY + side * collisionHalf;
+    }
+  }
+  return {
+    ...item,
+    x: nextX,
+    y: nextY,
+    vx: worldVelocity.x,
+    vy: worldVelocity.y,
+    ttl: item.ttl - dt,
+  };
+};
+
+export const isNightTime = (timeOfDay: number) =>
+  timeOfDay >= COMBAT.nightStart || timeOfDay < COMBAT.dawnEnd;
+
+const enemyDefinition = (type: EnemyState['type']) => type === 'lanternBeast'
+  ? {
+      health: COMBAT.lanternBeastHealth,
+      speed: COMBAT.lanternBeastSpeed,
+      damage: COMBAT.lanternBeastDamage,
+    }
+  : {
+      health: COMBAT.tideCrabHealth,
+      speed: COMBAT.tideCrabSpeed,
+      damage: COMBAT.tideCrabDamage,
+    };
+
+const spawnEnemy = (state: TideGameState) => {
+  if (state.enemies.length >= COMBAT.maxEnemies) return false;
+  const eliteChance = state.world.weather === 'storm'
+    ? COMBAT.eliteStormChance
+    : COMBAT.eliteBaseChance;
+  const type: EnemyState['type'] = takeRandom(state) < eliteChance ? 'lanternBeast' : 'tideCrab';
+  const definition = enemyDefinition(type);
+  const side = Math.floor(takeRandom(state) * 4);
+  const along = (takeRandom(state) - 0.5) * state.raft.size * WORLD.tileSize * 0.72;
+  const half = state.raft.size * WORLD.tileSize / 2;
+  const target = side === 0
+    ? { x: WORLD.centerX - half, y: WORLD.centerY + along }
+    : side === 1
+      ? { x: WORLD.centerX + half, y: WORLD.centerY + along }
+      : side === 2
+        ? { x: WORLD.centerX + along, y: WORLD.centerY - half }
+        : { x: WORLD.centerX + along, y: WORLD.centerY + half };
+  const targetScreen = projectWorldPoint(target);
+  const outward = projectWorldVector(target.x - WORLD.centerX, target.y - WORLD.centerY);
+  const outwardLength = Math.hypot(outward.x, outward.y) || 1;
+  const spawnScreen = {
+    x: targetScreen.x + outward.x / outwardLength * (190 + takeRandom(state) * 90),
+    y: targetScreen.y + outward.y / outwardLength * (150 + takeRandom(state) * 70),
+  };
+  const spawn = unprojectScreenPoint(spawnScreen);
+  state.enemies.push({
+    id: makeId(type),
+    type,
+    phase: 'swimming',
+    x: spawn.x,
+    y: spawn.y,
+    targetX: target.x,
+    targetY: target.y,
+    health: definition.health,
+    maxHealth: definition.health,
+    spawnedAt: state.world.elapsedSeconds,
+    phaseEndsAt: 0,
+    nextAttackAt: state.world.elapsedSeconds + 2,
+  });
+  addNotice(
+    state,
+    type === 'lanternBeast' ? '深海蓝光正在接近——精英怪物来袭。' : '船边传来刮擦声，潮蚀蟹正在靠近。',
+    'warning',
+  );
+  return true;
+};
+
+const advanceEnemy = (enemy: EnemyState, state: TideGameState, dt: number): EnemyState => {
+  const next = { ...enemy };
+  const now = state.world.elapsedSeconds;
+  if (next.phase === 'swimming') {
+    const dx = next.targetX - next.x;
+    const dy = next.targetY - next.y;
+    const distance = Math.hypot(dx, dy) || 1;
+    const speed = enemyDefinition(next.type).speed;
+    const step = Math.min(distance, speed * dt);
+    next.x += dx / distance * step;
+    next.y += dy / distance * step;
+    if (projectedDistance(next, { x: next.targetX, y: next.targetY }) <= 8) {
+      next.x = next.targetX;
+      next.y = next.targetY;
+      next.phase = 'boarding';
+      next.phaseEndsAt = now + (next.type === 'lanternBeast' ? 1.15 : 0.82);
+    }
+    return next;
+  }
+  if (next.phase === 'boarding') {
+    if (now >= next.phaseEndsAt) {
+      const inwardX = WORLD.centerX - next.x;
+      const inwardY = WORLD.centerY - next.y;
+      const length = Math.hypot(inwardX, inwardY) || 1;
+      next.x += inwardX / length * 20;
+      next.y += inwardY / length * 20;
+      next.phase = 'deck';
+      next.nextAttackAt = now + 0.75;
+    }
+    return next;
+  }
+
+  const dx = state.player.x - next.x;
+  const dy = state.player.y - next.y;
+  const screenDistance = projectedDistance(next, state.player);
+  if (screenDistance > COMBAT.enemyAttackRange) {
+    const distance = Math.hypot(dx, dy) || 1;
+    const speed = enemyDefinition(next.type).speed * 0.58;
+    next.x += dx / distance * speed * dt;
+    next.y += dy / distance * speed * dt;
+  } else if (now >= next.nextAttackAt) {
+    const definition = enemyDefinition(next.type);
+    state.player.health = clamp(state.player.health - definition.damage, 0, 100);
+    next.nextAttackAt = now + COMBAT.enemyAttackIntervalSeconds;
+    addNotice(state, `${next.type === 'lanternBeast' ? '灯鳍猎兽' : '潮蚀蟹'}发动攻击：生命 -${definition.damage}。`, 'warning');
+  }
+  return next;
 };
 
 const weatherFor = (seed: number, elapsedSeconds: number): Weather => {
@@ -326,6 +539,7 @@ export const createInitialGame = (
       facing: 'down',
     },
     inventory: { ...STARTING_INVENTORY },
+    equipment: { selected: 'cutlass', nextAttackAt: 0 },
     raft: { size: 2, integrity: 100, modules: emptyModules() },
     world: {
       seed,
@@ -341,6 +555,7 @@ export const createInitialGame = (
       nextGardenAt: SPAWNING.gardenIntervalSeconds,
       nextStormHitAt: SPAWNING.stormHitIntervalSeconds,
       nextEventAt: 26,
+      nextEnemyAt: COMBAT.firstSpawnDelaySeconds,
     },
     progress: {
       level: 1,
@@ -367,9 +582,11 @@ export const createInitialGame = (
         stormHits: 0,
         distanceMoved: 0,
         survivedSeconds: 0,
+        enemiesDefeated: 0,
       },
     },
     debris: [],
+    enemies: [],
     fishing: { active: false, marker: 0, direction: 1, targetStart: 40, targetWidth: 20 },
     event: null,
     rngStep: 0,
@@ -380,7 +597,9 @@ export const createInitialGame = (
   } satisfies TideGameState;
 
   state.progress.contract = createContract(state, 1);
-  for (let index = 0; index < SPAWNING.initialDebrisCount; index += 1) spawnDebris(state, true);
+  for (let index = 0; index < SPAWNING.initialDebrisCount; index += 1) {
+    spawnDebris(state, index < 4 ? 'nearby' : 'midstream');
+  }
   return state;
 };
 
@@ -461,7 +680,7 @@ export const collectNearby = (state: TideGameState, requestedId?: string) => {
   const next = cloneState(state);
   const collectRange = WORLD.collectRange + next.progress.perks.hook * 28;
   const candidates = next.debris
-    .map((item) => ({ item, distance: Math.hypot(item.x - next.player.x, item.y - next.player.y) }))
+    .map((item) => ({ item, distance: projectedDistance(item, next.player) }))
     .filter(({ item, distance }) => requestedId ? item.id === requestedId && distance <= collectRange : distance <= collectRange)
     .sort((a, b) => a.distance - b.distance);
   const target = candidates[0]?.item;
@@ -620,6 +839,65 @@ export const repairRaft = (state: TideGameState) => {
   return finalize(next);
 };
 
+export const selectEquipment = (state: TideGameState, equipment: EquipmentId) => {
+  if (state.equipment.selected === equipment) return state;
+  const next = cloneState(state);
+  next.equipment.selected = equipment;
+  return finalize(next);
+};
+
+export const getNearestAttackableEnemyId = (
+  state: TideGameState,
+  target?: { x: number; y: number },
+) => {
+  const origin = target ?? state.player;
+  return state.enemies
+    .filter((enemy) => enemy.phase === 'boarding' || enemy.phase === 'deck')
+    .map((enemy) => ({
+      id: enemy.id,
+      playerDistance: projectedDistance(enemy, state.player),
+      targetDistance: projectedDistance(enemy, origin),
+    }))
+    .filter((enemy) => enemy.playerDistance <= COMBAT.cutlassRange)
+    .sort((a, b) => a.targetDistance - b.targetDistance)[0]?.id ?? null;
+};
+
+export const attackEnemy = (state: TideGameState, requestedId?: string) => {
+  if (state.gameOver || state.equipment.selected !== 'cutlass') return state;
+  const next = cloneState(state);
+  if (next.world.elapsedSeconds < next.equipment.nextAttackAt) return next;
+  const targetId = requestedId ?? getNearestAttackableEnemyId(next);
+  const enemy = next.enemies.find((candidate) => candidate.id === targetId);
+  if (!enemy || (enemy.phase !== 'boarding' && enemy.phase !== 'deck')) return next;
+  if (projectedDistance(enemy, next.player) > COMBAT.cutlassRange) {
+    addNotice(next, '目标超出弯刀攻击范围。', 'warning');
+    return finalize(next);
+  }
+
+  next.equipment.nextAttackAt = next.world.elapsedSeconds + COMBAT.attackCooldownSeconds;
+  enemy.health = Math.max(0, enemy.health - COMBAT.cutlassDamage);
+  const pushX = enemy.x - next.player.x;
+  const pushY = enemy.y - next.player.y;
+  const pushLength = Math.hypot(pushX, pushY) || 1;
+  enemy.x += pushX / pushLength * 9;
+  enemy.y += pushY / pushLength * 9;
+  if (enemy.health > 0) return finalize(next);
+
+  next.enemies = next.enemies.filter((candidate) => candidate.id !== enemy.id);
+  next.progress.stats.enemiesDefeated += 1;
+  if (enemy.type === 'lanternBeast') {
+    addResources(next, { scrap: 2, parts: 2, fiber: 1 });
+    awardXp(next, 42);
+    addNotice(next, '深渊灯兽沉入夜海：废铁 +2、零件 +2、纤维 +1。', 'good');
+  } else {
+    const bonus: ResourceId = takeRandom(next) < 0.55 ? 'fiber' : 'parts';
+    addResources(next, { scrap: 1, [bonus]: 1 });
+    awardXp(next, 16);
+    addNotice(next, `潮汐蟹被击退：废铁 +1、${RESOURCE_LABELS[bonus]} +1。`, 'good');
+  }
+  return finalize(next);
+};
+
 export const upgradePerk = (state: TideGameState, perkId: PerkId) => {
   const next = cloneState(state);
   const definition = PERKS.find((perk) => perk.id === perkId);
@@ -773,7 +1051,7 @@ const resolveEventMutable = (state: TideGameState, choiceId: string, expired = f
     if (choiceId === 'follow') {
       state.raft.integrity = clamp(state.raft.integrity - 3, 0, 100);
       state.inventory.fish += 2;
-      for (let index = 0; index < 6; index += 1) spawnDebris(state, true);
+      for (let index = 0; index < 6; index += 1) spawnDebris(state, 'midstream');
       awardXp(state, 26);
       addNotice(state, '鲸群把木筏带入一条资源丰沛的海流。', 'good');
     } else {
@@ -821,11 +1099,20 @@ export const tickGame = (state: TideGameState, deltaSeconds: number) => {
   const next = cloneState(state);
   const dt = Math.min(deltaSeconds, 1);
   const previousDay = next.world.day;
+  const previousTimeOfDay = next.world.timeOfDay;
   next.world.elapsedSeconds += dt;
   next.progress.stats.survivedSeconds += dt;
   next.world.day = Math.floor(next.world.elapsedSeconds / WORLD.dayDurationSeconds) + 1;
   next.world.timeOfDay = (0.24 + next.world.elapsedSeconds / WORLD.dayDurationSeconds) % 1;
   next.world.weather = weatherFor(next.world.seed, next.world.elapsedSeconds);
+
+  if (
+    next.world.day >= COMBAT.firstThreatDay
+    && previousTimeOfDay < COMBAT.nightStart
+    && next.world.timeOfDay >= COMBAT.nightStart
+  ) {
+    addNotice(next, '夜潮正在靠近。装备弯刀，留意船体边缘。', 'warning');
+  }
 
   if (next.world.day !== previousDay) {
     awardXp(next, 22 + next.world.day * 2);
@@ -856,16 +1143,40 @@ export const tickGame = (state: TideGameState, deltaSeconds: number) => {
   }
 
   next.debris = next.debris
-    .map((item) => ({ ...item, x: item.x + item.vx * dt, y: item.y + item.vy * dt, ttl: item.ttl - dt }))
-    .filter((item) => item.ttl > 0 && item.x > -90 && item.x < WORLD.width + 90 && item.y > -90 && item.y < WORLD.height + 90);
+    .map((item) => advanceDebris(item, next, dt))
+    .filter((item) => {
+      const projected = projectWorldPoint(item);
+      return item.ttl > 0
+        && projected.x > -90
+        && projected.x < WORLD.width + 90
+        && projected.y > -90
+        && projected.y < WORLD.height + 90;
+    });
 
   if (next.world.elapsedSeconds >= next.world.nextDebrisAt) {
     spawnDebris(next);
-    const earlyBoost = next.world.day <= 2 ? 0.72 : 1;
-    const weatherBoost = next.world.weather === 'storm' ? 0.72 : 1;
-    const routeBoost = next.world.route === 'salvage' ? 0.78 : next.world.route === 'safe' ? 1.16 : 1;
-    next.world.nextDebrisAt = next.world.elapsedSeconds + SPAWNING.baseIntervalSeconds * earlyBoost * weatherBoost * routeBoost;
+    const weatherBoost = next.world.weather === 'storm' ? 0.85 : 1;
+    const routeBoost = next.world.route === 'salvage' ? 0.8 : next.world.route === 'safe' ? 1.25 : 1.05;
+    next.world.nextDebrisAt = next.world.elapsedSeconds + SPAWNING.baseIntervalSeconds * weatherBoost * routeBoost;
   }
+
+  const hostileNight = next.world.day >= COMBAT.firstThreatDay
+    && isNightTime(next.world.timeOfDay);
+  if (hostileNight) {
+    if (next.world.elapsedSeconds >= next.world.nextEnemyAt) {
+      spawnEnemy(next);
+      const weatherFactor = next.world.weather === 'storm' ? COMBAT.stormSpawnMultiplier : 1;
+      next.world.nextEnemyAt = next.world.elapsedSeconds
+        + COMBAT.spawnIntervalSeconds * weatherFactor
+        + takeRandom(next) * 4;
+    }
+  } else {
+    next.enemies = next.enemies.filter((enemy) => enemy.phase === 'deck');
+    if (next.world.nextEnemyAt <= next.world.elapsedSeconds) {
+      next.world.nextEnemyAt = next.world.elapsedSeconds + COMBAT.firstSpawnDelaySeconds;
+    }
+  }
+  next.enemies = next.enemies.map((enemy) => advanceEnemy(enemy, next, dt));
 
   const automationFactor = 1 - next.progress.perks.automation * 0.1;
   if (next.raft.modules.net && next.world.elapsedSeconds >= next.world.nextNetAt) {
@@ -930,7 +1241,7 @@ export const tickGame = (state: TideGameState, deltaSeconds: number) => {
 export const getNearestCollectableId = (state: TideGameState) => {
   const range = WORLD.collectRange + state.progress.perks.hook * 28;
   const nearest = state.debris
-    .map((item) => ({ id: item.id, distance: Math.hypot(item.x - state.player.x, item.y - state.player.y) }))
+    .map((item) => ({ id: item.id, distance: projectedDistance(item, state.player) }))
     .filter((item) => item.distance <= range)
     .sort((a, b) => a.distance - b.distance)[0];
   return nearest?.id ?? null;

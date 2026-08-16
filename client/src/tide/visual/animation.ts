@@ -1,5 +1,5 @@
 import type { PlayerAction, PlayerVisualState } from './types';
-import type { Direction } from './utilities';
+import type { VisualDirection } from './utilities';
 import { clamp01 } from './utilities';
 
 export interface ActionSpec {
@@ -15,15 +15,17 @@ export const ACTION_SPECS: Record<PlayerAction, ActionSpec> = {
   hookCast: { duration: 760, commitAt: 0.64, priority: 4, locksMovement: true },
   hookPull: { duration: 360, commitAt: null, priority: 4, locksMovement: true },
   fishCast: { duration: 720, commitAt: 0.72, priority: 4, locksMovement: false },
+  fishWait: { duration: Number.POSITIVE_INFINITY, commitAt: null, priority: 4, locksMovement: false },
   fishReel: { duration: 680, commitAt: 0.58, priority: 5, locksMovement: true },
   build: { duration: 1_080, commitAt: 0.76, priority: 5, locksMovement: true },
   consume: { duration: 620, commitAt: 0.52, priority: 3, locksMovement: false },
   repair: { duration: 980, commitAt: 0.7, priority: 5, locksMovement: true },
+  attack: { duration: 520, commitAt: 0.38, priority: 6, locksMovement: true },
   hurt: { duration: 480, commitAt: null, priority: 10, locksMovement: true },
 };
 
 export const createIdleVisualState = (
-  direction: Direction = 'down',
+  direction: VisualDirection = 'south',
   now = 0,
 ): PlayerVisualState => ({
   action: 'idle',
@@ -34,7 +36,7 @@ export const createIdleVisualState = (
 
 export const createActionVisualState = (
   action: PlayerAction,
-  direction: Direction,
+  direction: VisualDirection,
   now: number,
   options: Pick<PlayerVisualState, 'target' | 'commitToken'> = {},
 ): PlayerVisualState => ({
@@ -63,6 +65,15 @@ export const canInterruptAction = (
 
 export const isMovementLocked = (state: PlayerVisualState, now: number) =>
   !isActionFinished(state, now) && ACTION_SPECS[state.action].locksMovement;
+
+export const getFishingTransition = (
+  action: PlayerAction,
+  fishingActive: boolean,
+): 'fishCast' | 'fishReel' | null => {
+  if (action === 'fishCast' || action === 'fishReel') return null;
+  if (fishingActive || action === 'fishWait') return 'fishReel';
+  return 'fishCast';
+};
 
 export class ActionCommitGate {
   private committed = new Set<string>();

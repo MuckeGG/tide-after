@@ -1,4 +1,4 @@
-import type { Direction } from './utilities';
+import type { VisualDirection } from './utilities';
 
 export type PlayerAction =
   | 'idle'
@@ -6,19 +6,29 @@ export type PlayerAction =
   | 'hookCast'
   | 'hookPull'
   | 'fishCast'
+  | 'fishWait'
   | 'fishReel'
   | 'build'
   | 'consume'
   | 'repair'
+  | 'attack'
   | 'hurt';
 
 export interface PlayerVisualState {
   action: PlayerAction;
-  direction: Direction;
+  direction: VisualDirection;
   startedAt: number;
   duration: number;
   target?: { x: number; y: number };
   commitToken?: string;
+}
+
+export interface MovementIntent {
+  screenX: number;
+  screenY: number;
+  direction: VisualDirection;
+  active: boolean;
+  changedAt: number;
 }
 
 export type VisualEffectKind = 'splash' | 'woodchip' | 'spark' | 'bubble' | 'loot';
@@ -53,8 +63,9 @@ export type TideAssetMode = 'original' | 'reference';
 
 export interface LoadedTideAssets {
   mode: TideAssetMode;
-  diver: HTMLImageElement | null;
+  character: HTMLImageElement | null;
   woodTile: HTMLImageElement | null;
   platformEdge: HTMLImageElement | null;
   slotFrame: HTMLImageElement | null;
+  combat: HTMLImageElement | null;
 }

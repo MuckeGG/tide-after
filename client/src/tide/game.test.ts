@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  attackEnemy,
   buildModule,
   collectNearby,
   consumeResource,
@@ -10,12 +11,15 @@ import {
   resolveFishing,
   resolveOceanEvent,
   restartGame,
+  selectEquipment,
   setRoute,
   startFishing,
   tickGame,
   upgradePerk,
 } from './game';
 import { migrateSave } from './persistence';
+import { COMBAT, SPAWNING, WORLD } from './config';
+import { projectedDistance, projectWorldVector } from './visual/projection';
 import type { RaftModuleId, ResourceId, TideGameState } from './types';
 
 const fund = (state: TideGameState, quantity = 999) => {
@@ -40,8 +44,45 @@ describe('Tide After game engine', () => {
       wood: 4, plastic: 3, scrap: 1, fiber: 0,
       fish: 0, meal: 0, water: 0, parts: 0,
     });
-    expect(state.debris).toHaveLength(16);
+    expect(state.debris).toHaveLength(8);
+    expect(state.equipment.selected).toBe('cutlass');
+    expect(state.enemies).toEqual([]);
     expect(state.progress.tutorial.step).toBe(0);
+  });
+
+  it('starts with four reachable items and enforces the active debris cap', () => {
+    const state = createInitialGame('guest-debris-cap', 42);
+    expect(state.debris.slice(0, 4).every((item) => (
+      projectedDistance(item, state.player) <= WORLD.collectRange
+    ))).toBe(true);
+
+    const template = state.debris[0];
+    state.debris = Array.from({ length: SPAWNING.maxDebrisCount }, (_, index) => ({
+      ...template,
+      id: `cap-${index}`,
+      x: WORLD.centerX - 200 + index * 8,
+      y: WORLD.centerY - 120,
+      ttl: SPAWNING.debrisLifetimeSeconds,
+    }));
+    state.world.nextDebrisAt = 0;
+    expect(tickGame(state, 0.1).debris).toHaveLength(SPAWNING.maxDebrisCount);
+  });
+
+  it('keeps debris moving while it slips around the raft edge', () => {
+    const state = createInitialGame('guest-slip', 91);
+    state.debris = [{
+      ...state.debris[0],
+      id: 'edge-slip',
+      x: WORLD.centerX + 70,
+      y: WORLD.centerY,
+      vx: 0,
+      vy: 0,
+      ttl: SPAWNING.debrisLifetimeSeconds,
+    }];
+    const moved = tickGame(state, 0.25).debris[0];
+    const screenVelocity = projectWorldVector(moved.vx, moved.vy);
+    expect(Math.hypot(screenVelocity.x, screenVelocity.y)).toBeGreaterThanOrEqual(16);
+    expect(projectedDistance(moved, state.debris[0])).toBeGreaterThan(0);
   });
 
   it('drains survival meters and damages health only after a meter is empty', () => {
@@ -222,6 +263,71 @@ describe('Tide After game engine', () => {
     expect(next.raft.integrity).toBe(100);
   });
 
+  it('keeps the first night safe and begins enemy threats on the second night', () => {
+    const firstNight = createInitialGame('guest-safe-night', 18);
+    firstNight.world.elapsedSeconds = 70;
+    firstNight.world.nextEnemyAt = 0;
+    expect(tickGame(firstNight, 0.5).enemies).toHaveLength(0);
+
+    const secondNight = createInitialGame('guest-hostile-night', 18);
+    secondNight.world.elapsedSeconds = 219;
+    secondNight.world.nextEnemyAt = 0;
+    const threatened = tickGame(secondNight, 0.5);
+    expect(threatened.world.day).toBe(2);
+    expect(threatened.enemies).toHaveLength(1);
+    expect(threatened.enemies[0].phase).toBe('swimming');
+  });
+
+  it('caps enemies and removes swimmers after dawn while deck enemies remain', () => {
+    const state = createInitialGame('guest-enemy-cap', 31);
+    state.world.elapsedSeconds = 219;
+    state.world.nextEnemyAt = 0;
+    state.enemies = Array.from({ length: COMBAT.maxEnemies }, (_, index) => ({
+      id: `enemy-${index}`,
+      type: 'tideCrab' as const,
+      phase: index === 0 ? 'deck' as const : 'swimming' as const,
+      x: WORLD.centerX + 30 + index,
+      y: WORLD.centerY,
+      targetX: WORLD.centerX,
+      targetY: WORLD.centerY,
+      health: COMBAT.tideCrabHealth,
+      maxHealth: COMBAT.tideCrabHealth,
+      spawnedAt: 0,
+      phaseEndsAt: 0,
+      nextAttackAt: 999,
+    }));
+    expect(tickGame(state, 0.2).enemies).toHaveLength(COMBAT.maxEnemies);
+    state.world.elapsedSeconds = 285;
+    state.world.timeOfDay = 0.13;
+    const dawn = tickGame(state, 0.2);
+    expect(dawn.enemies).toHaveLength(1);
+    expect(dawn.enemies[0].phase).toBe('deck');
+  });
+
+  it('switches equipment and applies one sword hit per cooldown with a single drop', () => {
+    let state = createInitialGame('guest-combat', 42);
+    state = selectEquipment(state, 'salvageTool');
+    expect(state.equipment.selected).toBe('salvageTool');
+    state = selectEquipment(state, 'cutlass');
+    state.enemies = [{
+      id: 'crab-target', type: 'tideCrab', phase: 'deck',
+      x: state.player.x + 20, y: state.player.y,
+      targetX: state.player.x, targetY: state.player.y,
+      health: COMBAT.tideCrabHealth, maxHealth: COMBAT.tideCrabHealth,
+      spawnedAt: 0, phaseEndsAt: 0, nextAttackAt: 999,
+    }];
+    const first = attackEnemy(state, 'crab-target');
+    expect(first.enemies[0].health).toBe(COMBAT.tideCrabHealth - COMBAT.cutlassDamage);
+    expect(attackEnemy(first, 'crab-target').enemies[0].health).toBe(first.enemies[0].health);
+    first.world.elapsedSeconds = first.equipment.nextAttackAt + 0.01;
+    const defeated = attackEnemy(first, 'crab-target');
+    expect(defeated.enemies).toHaveLength(0);
+    expect(defeated.progress.stats.enemiesDefeated).toBe(1);
+    expect(defeated.inventory.scrap).toBe(state.inventory.scrap + 1);
+    expect(defeated.inventory.fiber + defeated.inventory.parts).toBe(1);
+    expect(attackEnemy(defeated, 'crab-target').progress.stats.enemiesDefeated).toBe(1);
+  });
+
   it('unlocks endless voyage after day twelve with the beacon', () => {
     const state = createInitialGame('guest-test', 42);
     state.raft.modules.beacon = true;
@@ -263,6 +369,27 @@ describe('Tide After game engine', () => {
     expect(migrated?.raft.modules.net).toBe(true);
   });
 
+  it('normalizes older v2 saves that predate equipment and enemies', () => {
+    const current = createInitialGame('guest-old-v2', 72);
+    const old = structuredClone(current) as unknown as {
+      equipment?: TideGameState['equipment'];
+      enemies?: TideGameState['enemies'];
+      world: Partial<TideGameState['world']>;
+      progress: Omit<TideGameState['progress'], 'stats'> & {
+        stats: Partial<TideGameState['progress']['stats']>;
+      };
+    };
+    delete old.equipment;
+    delete old.enemies;
+    delete old.world.nextEnemyAt;
+    delete old.progress.stats.enemiesDefeated;
+    const migrated = migrateSave(old, 'fallback');
+    expect(migrated?.equipment.selected).toBe('cutlass');
+    expect(migrated?.enemies).toEqual([]);
+    expect(migrated?.progress.stats.enemiesDefeated).toBe(0);
+    expect(migrated?.world.nextEnemyAt).toBeGreaterThan(migrated?.world.elapsedSeconds ?? 0);
+  });
+
   it('survives a deterministic twelve-day simulation without invalid state', () => {
     let state = createInitialGame('guest-long-run', 20260816);
     state.progress.tutorial.completed = true;
@@ -271,12 +398,11 @@ describe('Tide After game engine', () => {
     state.raft.modules.grill = true;
     state.raft.modules.garden = true;
     for (let index = 0; index < 3_605; index += 1) {
-      if (index % 90 === 0) {
-        state.player.health = 100;
-        state.player.hunger = 100;
-        state.player.thirst = 100;
-        state.raft.integrity = 100;
-      }
+      state.player.health = 100;
+      state.player.hunger = 100;
+      state.player.thirst = 100;
+      state.raft.integrity = 100;
+      state.enemies = [];
       state = tickGame(state, 0.5);
       if (state.event) state = resolveOceanEvent(state, state.event.kind === 'supply' ? 'safe' : 'ignore');
     }

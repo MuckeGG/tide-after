@@ -1,14 +1,21 @@
-import { WORLD } from '../config';
+import { COMBAT, WORLD } from '../config';
 import { getNearestCollectableId } from '../game';
-import type { DebrisItem, RaftModuleId, TideGameState } from '../types';
+import type { DebrisItem, EnemyState, RaftModuleId, TideGameState } from '../types';
 import { getActionProgress } from './animation';
+import {
+  interpolatePosition,
+  projectWorldPoint,
+  projectWorldVector,
+} from './projection';
 import type {
   LoadedTideAssets,
+  MovementIntent,
   Particle,
   PlayerVisualState,
   VisualEffect,
 } from './types';
-import { clamp01 } from './utilities';
+import { clamp01, type VisualDirection, visualDirectionVector } from './utilities';
+import { DEBRIS_WATER_PROFILES, sampleWaterSurface } from './water';
 
 interface SceneEntity {
   id: string;
@@ -20,6 +27,9 @@ export interface TideRendererMemory {
   lastPlayerX: number;
   lastPlayerY: number;
   lastMovedAt: number;
+  renderedPlayerX: number;
+  renderedPlayerY: number;
+  lastFrameAt: number;
   particles: Particle[];
   emitted: Set<string>;
   nextParticleId: number;
@@ -29,6 +39,9 @@ export const createTideRendererMemory = (state: TideGameState): TideRendererMemo
   lastPlayerX: state.player.x,
   lastPlayerY: state.player.y,
   lastMovedAt: 0,
+  renderedPlayerX: state.player.x,
+  renderedPlayerY: state.player.y,
+  lastFrameAt: 0,
   particles: [],
   emitted: new Set(),
   nextParticleId: 1,
@@ -60,52 +73,77 @@ const drawOcean = (
   now: number,
 ) => {
   const seconds = now / 1000;
-  const sun = Math.max(0.12, Math.sin(state.world.timeOfDay * Math.PI));
   const storm = state.world.weather === 'storm';
+  const cloudy = state.world.weather === 'cloudy';
+  const night = state.world.timeOfDay >= COMBAT.nightStart || state.world.timeOfDay < COMBAT.dawnEnd;
   const gradient = context.createLinearGradient(0, 0, WORLD.width, WORLD.height);
-  gradient.addColorStop(0, storm ? '#102f3d' : '#086a7f');
-  gradient.addColorStop(0.55, storm ? '#174451' : '#0d8794');
-  gradient.addColorStop(1, state.world.timeOfDay > 0.7 ? '#083242' : '#095f72');
+  gradient.addColorStop(0, storm ? '#102d3b' : night ? '#052f43' : cloudy ? '#0a5366' : '#08798c');
+  gradient.addColorStop(0.46, storm ? '#18434e' : night ? '#075069' : cloudy ? '#0c7180' : '#0b99a0');
+  gradient.addColorStop(1, storm ? '#0b2735' : night ? '#031f35' : '#086477');
   context.fillStyle = gradient;
   context.fillRect(0, 0, WORLD.width, WORLD.height);
 
-  const layers = [
-    { speed: 13, spacing: 62, length: 31, alpha: 0.07, width: 2 },
-    { speed: -21, spacing: 88, length: 46, alpha: 0.11, width: 3 },
-    { speed: 34, spacing: 126, length: 68, alpha: 0.08, width: 4 },
-  ];
-  layers.forEach((layer, layerIndex) => {
-    const offset = (seconds * layer.speed) % layer.spacing;
-    context.strokeStyle = waveColor(layer.alpha + sun * 0.045);
-    context.lineWidth = layer.width;
-    for (let row = -2; row < 12; row += 1) {
-      const y = row * layer.spacing * 0.62 + offset + layerIndex * 15;
-      for (let column = -2; column < 15; column += 1) {
-        const x = column * layer.spacing + (row % 2) * layer.spacing * 0.38;
-        context.beginPath();
-        context.moveTo(x, y);
-        context.quadraticCurveTo(
-          x + layer.length * 0.5,
-          y - 7 - layerIndex * 2,
-          x + layer.length,
-          y,
-        );
-        context.stroke();
-      }
-    }
-  });
-
-  context.fillStyle = 'rgba(102, 222, 210, 0.035)';
-  for (let index = 0; index < 18; index += 1) {
-    const x = (index * 97 + seconds * 10) % (WORLD.width + 120) - 60;
-    const y = (index * 53 + Math.sin(seconds + index) * 19) % WORLD.height;
+  context.save();
+  context.globalCompositeOperation = 'screen';
+  for (let index = 0; index < 14; index += 1) {
+    const drift = seconds * (7 + index % 3 * 4);
+    const x = ((index * 173 + drift) % (WORLD.width + 260)) - 130;
+    const y = 35 + ((index * 97 + Math.sin(seconds * 0.28 + index) * 44) % (WORLD.height - 40));
+    const sample = sampleWaterSurface(x, y, now, state.world.weather);
+    const width = 95 + (index * 37) % 170;
+    const patch = context.createRadialGradient(x, y, 4, x, y, width);
+    patch.addColorStop(0, `rgba(88, 224, 216, ${0.035 + sample.foam * 0.035})`);
+    patch.addColorStop(1, 'rgba(17, 92, 111, 0)');
+    context.fillStyle = patch;
     context.beginPath();
-    context.ellipse(x, y, 45, 10, -0.2, 0, Math.PI * 2);
+    context.ellipse(x, y, width, 18 + index % 4 * 7, -0.15 + index % 3 * 0.12, 0, Math.PI * 2);
     context.fill();
+  }
+  context.restore();
+
+  const waveCount = storm ? 58 : cloudy ? 43 : 36;
+  for (let index = 0; index < waveCount; index += 1) {
+    const lane = (index * 83 + state.world.seed * 0.013) % (WORLD.height + 100) - 50;
+    const speed = (index % 2 ? 18 : -12) * (storm ? 1.55 : 1);
+    const x = ((index * 149 + seconds * speed) % (WORLD.width + 260) + WORLD.width + 260) % (WORLD.width + 260) - 130;
+    const y = lane + Math.sin(seconds * (0.42 + index % 5 * 0.07) + index * 1.73) * (9 + index % 4 * 4);
+    const length = 32 + (index * 29) % 92;
+    const crest = sampleWaterSurface(x, y, now, state.world.weather).foam;
+    context.strokeStyle = waveColor(0.055 + crest * (storm ? 0.3 : 0.18));
+    context.lineWidth = crest > 0.58 ? 3 : 1.4 + index % 3 * 0.45;
+    context.beginPath();
+    context.moveTo(x, y + 3);
+    context.bezierCurveTo(
+      x + length * 0.18,
+      y - 7 - index % 5,
+      x + length * 0.48,
+      y - 4 + index % 3,
+      x + length * 0.66,
+      y,
+    );
+    context.quadraticCurveTo(x + length * 0.84, y + 7, x + length, y + 2);
+    context.stroke();
+    if (crest > 0.62) {
+      context.fillStyle = `rgba(207, 247, 239, ${0.11 + crest * 0.18})`;
+      context.fillRect(Math.round(x + length * 0.28), Math.round(y - 4), 4 + index % 8, 2);
+    }
+  }
+
+  if (night) {
+    context.fillStyle = 'rgba(82, 230, 218, 0.28)';
+    for (let index = 0; index < 18; index += 1) {
+      const pulse = 0.35 + Math.sin(seconds * 1.3 + index * 2.1) * 0.35;
+      if (pulse < 0.22) continue;
+      const x = (index * 211 + state.world.seed) % WORLD.width;
+      const y = (index * 113 + state.world.seed * 0.2) % WORLD.height;
+      context.globalAlpha = pulse;
+      context.fillRect(x, y, 2 + index % 3, 1);
+    }
+    context.globalAlpha = 1;
   }
 
   if (storm) {
-    context.strokeStyle = 'rgba(218, 242, 242, 0.24)';
+    context.strokeStyle = 'rgba(218, 242, 242, 0.25)';
     context.lineWidth = 2;
     for (let index = 0; index < 46; index += 1) {
       const x = (index * 71 + seconds * 148) % (WORLD.width + 130) - 70;
@@ -121,17 +159,37 @@ const drawOcean = (
 const drawDebris = (
   context: CanvasRenderingContext2D,
   item: DebrisItem,
+  state: TideGameState,
+  assets: LoadedTideAssets,
   now: number,
   highlighted: boolean,
 ) => {
   const seconds = now / 1000;
-  const bob = Math.sin(seconds * 2.7 + item.x * 0.021) * 2.8;
+  const projected = projectWorldPoint(item);
+  const velocity = projectWorldVector(item.vx, item.vy);
+  const speed = Math.hypot(velocity.x, velocity.y) || 1;
+  const profile = DEBRIS_WATER_PROFILES[item.type];
+  const water = sampleWaterSurface(item.x, item.y, now, state.world.weather);
+  const bob = water.height * profile.bobStrength - profile.submerge;
+  const angle = water.slopeX * profile.rollStrength
+    + Math.sin(seconds * 0.75 + item.y * 0.019) * 0.045 * profile.rollStrength;
   context.save();
-  context.translate(Math.round(item.x), Math.round(item.y + bob));
-  context.rotate(Math.sin(seconds * 1.4 + item.y) * 0.08);
-  context.fillStyle = 'rgba(1, 24, 31, 0.3)';
+  context.translate(Math.round(projected.x), Math.round(projected.y + bob));
+  context.strokeStyle = `rgba(190, 239, 231, ${0.13 + profile.wakeStrength * 0.13})`;
+  context.lineWidth = 1.4 + profile.wakeStrength;
   context.beginPath();
-  context.ellipse(2, 11, 19, 6, 0, 0, Math.PI * 2);
+  context.moveTo(-velocity.x / speed * 8, -velocity.y / speed * 8 + profile.submerge);
+  context.quadraticCurveTo(
+    -velocity.x / speed * 22 - velocity.y / speed * 5,
+    -velocity.y / speed * 22 + profile.submerge + 4,
+    -velocity.x / speed * (28 + profile.wakeStrength * 8),
+    -velocity.y / speed * (28 + profile.wakeStrength * 8) + profile.submerge + 2,
+  );
+  context.stroke();
+  context.rotate(angle);
+  context.fillStyle = 'rgba(1, 24, 31, 0.22)';
+  context.beginPath();
+  context.ellipse(2, profile.submerge + 3, profile.displaySize * 0.36, 4.5, 0, 0, Math.PI * 2);
   context.fill();
   if (highlighted) {
     context.strokeStyle = 'rgba(248, 218, 112, 0.78)';
@@ -143,7 +201,27 @@ const drawDebris = (
     context.setLineDash([]);
   }
 
-  if (item.type === 'wood') {
+  if (assets.combat) {
+    const columns: Record<DebrisItem['type'], number> = {
+      wood: 0,
+      plastic: 1,
+      scrap: 2,
+      fiber: 3,
+      crate: 4,
+    };
+    const size = profile.displaySize;
+    context.drawImage(
+      assets.combat,
+      columns[item.type] * 128,
+      128,
+      128,
+      128,
+      -size / 2,
+      -size * 0.72,
+      size,
+      size,
+    );
+  } else if (item.type === 'wood') {
     context.fillStyle = '#573827';
     roundedRect(context, -19, -7, 38, 14, 5);
     context.fill();
@@ -207,7 +285,38 @@ const drawDebris = (
     context.fillStyle = '#c6633e';
     context.fillRect(8, -10, 5, 16);
   }
+
+  context.fillStyle = state.world.weather === 'storm'
+    ? 'rgba(22, 75, 88, 0.44)'
+    : 'rgba(20, 130, 143, 0.33)';
+  context.fillRect(-profile.displaySize * 0.46, 1, profile.displaySize * 0.92, profile.submerge + 9);
+  context.strokeStyle = `rgba(211, 248, 239, ${0.34 + water.foam * 0.42})`;
+  context.lineWidth = 1.5;
+  context.beginPath();
+  context.moveTo(-profile.displaySize * 0.38, 1);
+  context.quadraticCurveTo(0, -2 - water.foam * 2, profile.displaySize * 0.38, 1);
+  context.stroke();
+  const bubbleWindow = ((seconds + item.x * 0.031 + item.y * 0.017) * profile.bubbleRate) % 5;
+  if (bubbleWindow < 0.75) {
+    context.strokeStyle = 'rgba(197, 244, 238, 0.55)';
+    context.lineWidth = 1;
+    for (let index = 0; index < 3; index += 1) {
+      context.beginPath();
+      context.arc(-12 + index * 8, 7 + Math.sin(seconds * 2 + index) * 3, 1.5 + index * 0.7, 0, Math.PI * 2);
+      context.stroke();
+    }
+  }
   context.restore();
+};
+
+const diamondPath = (
+  context: CanvasRenderingContext2D,
+  points: Array<{ x: number; y: number }>,
+) => {
+  context.beginPath();
+  context.moveTo(points[0].x, points[0].y);
+  points.slice(1).forEach((point) => context.lineTo(point.x, point.y));
+  context.closePath();
 };
 
 const drawRaftBase = (
@@ -218,103 +327,155 @@ const drawRaftBase = (
 ) => {
   const tile = WORLD.tileSize;
   const size = state.raft.size;
-  const startX = WORLD.centerX - size * tile / 2;
-  const startY = WORLD.centerY - size * tile / 2;
-  const width = size * tile;
-  const side = 10;
+  const half = size * tile / 2;
+  const startX = WORLD.centerX - half;
+  const startY = WORLD.centerY - half;
+  const centerWater = sampleWaterSurface(WORLD.centerX, WORLD.centerY, now, state.world.weather);
+  const bob = Math.max(-2.5, Math.min(2.5, centerWater.height * 0.72));
+  const side = 16;
+  const projectDeck = (x: number, y: number) => {
+    const point = projectWorldPoint({ x, y });
+    const tilt = Math.max(-2.4, Math.min(
+      2.4,
+      (x - WORLD.centerX) * centerWater.slopeX * 0.12
+        + (y - WORLD.centerY) * centerWater.slopeY * 0.12,
+    ));
+    return { x: point.x, y: point.y + bob + tilt };
+  };
+  const back = projectDeck(WORLD.centerX - half, WORLD.centerY - half);
+  const right = projectDeck(WORLD.centerX + half, WORLD.centerY - half);
+  const front = projectDeck(WORLD.centerX + half, WORLD.centerY + half);
+  const left = projectDeck(WORLD.centerX - half, WORLD.centerY + half);
 
-  context.fillStyle = 'rgba(0, 18, 24, 0.32)';
-  context.beginPath();
-  context.ellipse(
-    startX + width / 2 + 8,
-    startY + width / 2 + 14,
-    width * 0.57,
-    width * 0.52,
-    0,
-    0,
-    Math.PI * 2,
-  );
+  context.fillStyle = 'rgba(0, 21, 29, 0.24)';
+  diamondPath(context, [
+    { x: back.x, y: back.y + side - 3 },
+    { x: right.x + 7, y: right.y + side - 2 },
+    { x: front.x + 4, y: front.y + side + 4 },
+    { x: left.x - 7, y: left.y + side - 2 },
+  ]);
   context.fill();
 
-  context.fillStyle = '#3c2c25';
-  context.beginPath();
-  context.moveTo(startX + 4, startY + width);
-  context.lineTo(startX + width, startY + width);
-  context.lineTo(startX + width - 7, startY + width + side);
-  context.lineTo(startX + 10, startY + width + side);
-  context.closePath();
+  context.fillStyle = '#3c2922';
+  diamondPath(context, [right, front, { x: front.x, y: front.y + side }, { x: right.x, y: right.y + side }]);
   context.fill();
-  context.fillStyle = '#4f3828';
-  context.beginPath();
-  context.moveTo(startX + width, startY + 5);
-  context.lineTo(startX + width, startY + width);
-  context.lineTo(startX + width - 7, startY + width + side);
-  context.lineTo(startX + width - 7, startY + 11);
-  context.closePath();
+  context.fillStyle = '#523729';
+  diamondPath(context, [front, left, { x: left.x, y: left.y + side }, { x: front.x, y: front.y + side }]);
   context.fill();
+
+  context.fillStyle = '#98613a';
+  diamondPath(context, [back, right, front, left]);
+  context.fill();
+  context.strokeStyle = '#3b2922';
+  context.lineWidth = 2;
+  context.stroke();
 
   for (let row = 0; row < size; row += 1) {
     for (let column = 0; column < size; column += 1) {
       const seed = row * 17 + column * 31 + state.world.seed;
-      const nudgeX = ((seed % 3) - 1) * 2;
-      const nudgeY = (((seed >> 2) % 3) - 1);
-      const x = Math.round(startX + column * tile + nudgeX);
-      const y = Math.round(startY + row * tile + nudgeY);
-      const light = (row + column + seed) % 2 === 0;
-      context.fillStyle = '#4d3125';
-      roundedRect(context, x + 2, y + 3, tile - 3, tile - 2, 5);
+      const x0 = startX + column * tile;
+      const y0 = startY + row * tile;
+      const tilePoints = [
+        projectDeck(x0, y0),
+        projectDeck(x0 + tile, y0),
+        projectDeck(x0 + tile, y0 + tile),
+        projectDeck(x0, y0 + tile),
+      ];
+      context.fillStyle = (row + column + seed) % 2 === 0 ? '#aa7042' : '#95603a';
+      diamondPath(context, tilePoints);
       context.fill();
-      context.fillStyle = light ? '#a86d3f' : '#95603a';
-      roundedRect(context, x + 2, y + 1, tile - 5, tile - 6, 5);
-      context.fill();
+      context.strokeStyle = 'rgba(54, 35, 27, 0.78)';
+      context.lineWidth = 1.25;
+      context.stroke();
 
       if (assets.mode === 'reference' && assets.woodTile) {
         context.save();
-        roundedRect(context, x + 3, y + 2, tile - 7, tile - 8, 4);
+        diamondPath(context, tilePoints);
         context.clip();
-        context.globalAlpha = 0.24;
-        context.drawImage(assets.woodTile, 0, 0, 16, 16, x + 3, y + 2, tile - 7, tile - 8);
+        context.globalAlpha = 0.18;
+        context.drawImage(
+          assets.woodTile,
+          0,
+          0,
+          16,
+          16,
+          tilePoints[3].x,
+          tilePoints[0].y,
+          tilePoints[1].x - tilePoints[3].x,
+          tilePoints[2].y - tilePoints[0].y,
+        );
         context.restore();
       }
 
-      context.strokeStyle = light ? '#d09a58' : '#bf8750';
-      context.lineWidth = 2;
+      context.strokeStyle = '#d09a58';
+      context.lineWidth = 1.5;
       context.beginPath();
-      context.moveTo(x + 8, y + 11);
-      context.quadraticCurveTo(x + tile * 0.55, y + 7, x + tile - 10, y + 12);
-      context.moveTo(x + 10, y + tile - 14);
-      context.lineTo(x + tile - 16, y + tile - 17);
+      const grainA = projectDeck(x0 + 9, y0 + 17 + seed % 8);
+      const grainB = projectDeck(x0 + tile - 10, y0 + 17 + seed % 8);
+      const grainC = projectDeck(x0 + 12, y0 + tile - 13);
+      const grainD = projectDeck(x0 + tile - 13, y0 + tile - 13);
+      context.moveTo(grainA.x, grainA.y);
+      context.lineTo(grainB.x, grainB.y);
+      context.moveTo(grainC.x, grainC.y);
+      context.lineTo(grainD.x, grainD.y);
       context.stroke();
-      context.fillStyle = '#303435';
+      const knot = projectDeck(x0 + tile * 0.5, y0 + tile * 0.5);
+      context.fillStyle = '#3b312b';
       context.beginPath();
-      context.arc(x + 9, y + 9, 2.2, 0, Math.PI * 2);
-      context.arc(x + tile - 12, y + tile - 12, 2.2, 0, Math.PI * 2);
+      context.arc(knot.x, knot.y, 1.7, 0, Math.PI * 2);
       context.fill();
     }
   }
 
   if (state.raft.modules.reinforcedDeck) {
     context.strokeStyle = '#667579';
-    context.lineWidth = 6;
-    roundedRect(context, startX - 3, startY - 3, width + 6, width + 8, 5);
+    context.lineWidth = 5;
+    diamondPath(context, [back, right, front, left]);
     context.stroke();
     context.strokeStyle = '#aeb9ad';
-    context.lineWidth = 2;
-    roundedRect(context, startX - 2, startY - 2, width + 4, width + 6, 4);
+    context.lineWidth = 1.5;
     context.stroke();
   }
 
-  const foamPhase = now / 180;
-  context.strokeStyle = 'rgba(214, 247, 235, 0.55)';
-  context.lineWidth = 3;
-  for (let index = 0; index < size * 2 + 2; index += 1) {
-    const x = startX + 8 + (index * 43 + foamPhase) % Math.max(40, width - 16);
-    context.beginPath();
-    context.arc(x, startY + width + side + Math.sin(index + foamPhase) * 2, 7, Math.PI, Math.PI * 2);
-    context.stroke();
-  }
+  const waterLine = side - 5 + Math.sin(now / 390) * 1.2;
+  context.fillStyle = state.world.weather === 'storm'
+    ? 'rgba(18, 73, 86, 0.56)'
+    : 'rgba(13, 116, 130, 0.46)';
+  diamondPath(context, [
+    { x: right.x, y: right.y + waterLine },
+    { x: front.x, y: front.y + waterLine },
+    { x: front.x, y: front.y + side + 2 },
+    { x: right.x, y: right.y + side + 2 },
+  ]);
+  context.fill();
+  diamondPath(context, [
+    { x: front.x, y: front.y + waterLine },
+    { x: left.x, y: left.y + waterLine },
+    { x: left.x, y: left.y + side + 2 },
+    { x: front.x, y: front.y + side + 2 },
+  ]);
+  context.fill();
 
-  return { startX, startY, width };
+  const foamPhase = now / 1000;
+  context.strokeStyle = state.world.weather === 'storm'
+    ? 'rgba(224, 250, 242, 0.78)'
+    : 'rgba(214, 247, 235, 0.56)';
+  context.lineWidth = state.world.weather === 'storm' ? 3 : 2;
+  const contactEdges = [[left, front], [right, front]] as const;
+  contactEdges.forEach(([edgeStart, edgeEnd], edgeIndex) => {
+    for (let index = 0; index < size + 2; index += 1) {
+      const progress = (index * 0.27 + foamPhase * (0.08 + edgeIndex * 0.03)) % 1;
+      const x = edgeStart.x + (edgeEnd.x - edgeStart.x) * progress;
+      const y = edgeStart.y + (edgeEnd.y - edgeStart.y) * progress + waterLine;
+      const length = 5 + (index * 3) % 9;
+      context.beginPath();
+      context.moveTo(x - length, y + Math.sin(foamPhase * 2 + index) * 1.5);
+      context.quadraticCurveTo(x, y - 3, x + length, y + 1);
+      context.stroke();
+    }
+  });
+
+  return { startX, startY, width: size * tile, half, bob };
 };
 
 const drawNet = (
@@ -322,19 +483,120 @@ const drawNet = (
   x: number,
   y: number,
   width: number,
+  bob: number,
 ) => {
+  const start = projectWorldPoint({ x: x + 8, y });
+  const end = projectWorldPoint({ x: x + width - 8, y });
+  start.y += bob + 4;
+  end.y += bob + 4;
   context.save();
   context.strokeStyle = '#d7bf82';
   context.lineWidth = 2;
   context.beginPath();
-  context.moveTo(x + 8, y);
-  context.quadraticCurveTo(x + width / 2, y + 31, x + width - 8, y);
+  context.moveTo(start.x, start.y);
+  context.quadraticCurveTo((start.x + end.x) / 2, (start.y + end.y) / 2 + 25, end.x, end.y);
   context.stroke();
-  for (let index = 14; index < width - 10; index += 18) {
+  for (let progress = 0.14; progress < 0.9; progress += 0.16) {
+    const px = start.x + (end.x - start.x) * progress;
+    const py = start.y + (end.y - start.y) * progress;
     context.beginPath();
-    context.moveTo(x + index, y + 2);
-    context.lineTo(x + index + 12, y + 23);
+    context.moveTo(px, py + 2);
+    context.lineTo(px + 8, py + 21);
     context.stroke();
+  }
+  context.restore();
+};
+
+const drawEnemy = (
+  context: CanvasRenderingContext2D,
+  enemy: EnemyState,
+  state: TideGameState,
+  assets: LoadedTideAssets,
+  now: number,
+  raftOffset: number,
+) => {
+  const projected = projectWorldPoint(enemy);
+  const water = sampleWaterSurface(enemy.x, enemy.y, now, state.world.weather);
+  const isElite = enemy.type === 'lanternBeast';
+  const size = isElite ? 82 : 62;
+  const boardingDuration = isElite ? 1.15 : 0.82;
+  const boardingProgress = enemy.phase === 'boarding'
+    ? clamp01(1 - Math.max(0, enemy.phaseEndsAt - state.world.elapsedSeconds) / boardingDuration)
+    : 0;
+  const y = projected.y
+    + (enemy.phase === 'deck' ? raftOffset : water.height * 0.8)
+    - boardingProgress * 22
+    + Math.sin(now / (isElite ? 210 : 155) + enemy.x * 0.02) * (enemy.phase === 'deck' ? 1 : 2.2);
+
+  context.save();
+  context.translate(projected.x, y);
+  if (enemy.phase === 'swimming') {
+    const targetScreen = projectWorldPoint({ x: enemy.targetX, y: enemy.targetY });
+    const dx = targetScreen.x - projected.x;
+    const dy = targetScreen.y - projected.y;
+    const length = Math.hypot(dx, dy) || 1;
+    context.strokeStyle = isElite ? 'rgba(92, 232, 220, 0.5)' : 'rgba(205, 244, 235, 0.34)';
+    context.lineWidth = isElite ? 3 : 2;
+    context.beginPath();
+    context.moveTo(-dx / length * 17, -dy / length * 17 + 6);
+    context.quadraticCurveTo(-dx / length * 35 - dy / length * 6, -dy / length * 35 + 10, -dx / length * 51, -dy / length * 51 + 7);
+    context.stroke();
+  }
+  context.fillStyle = 'rgba(0, 18, 25, 0.3)';
+  context.beginPath();
+  context.ellipse(2, 8, size * 0.35, 7, 0, 0, Math.PI * 2);
+  context.fill();
+  if (isElite) {
+    const glow = context.createRadialGradient(0, -20, 2, 0, -20, 42);
+    glow.addColorStop(0, 'rgba(88, 238, 224, 0.38)');
+    glow.addColorStop(1, 'rgba(88, 238, 224, 0)');
+    context.fillStyle = glow;
+    context.fillRect(-45, -65, 90, 90);
+  }
+  if (assets.combat) {
+    context.drawImage(
+      assets.combat,
+      (isElite ? 1 : 0) * 128,
+      0,
+      128,
+      128,
+      -size / 2,
+      -size * 0.78,
+      size,
+      size,
+    );
+  } else {
+    context.fillStyle = isElite ? '#225e67' : '#9a4d32';
+    context.beginPath();
+    context.ellipse(0, -13, size * 0.3, size * 0.22, 0, 0, Math.PI * 2);
+    context.fill();
+    context.strokeStyle = isElite ? '#68e1d4' : '#d88955';
+    context.lineWidth = 4;
+    context.beginPath();
+    context.moveTo(-10, -5);
+    context.lineTo(-27, 8);
+    context.moveTo(10, -5);
+    context.lineTo(27, 8);
+    context.stroke();
+  }
+  if (enemy.phase !== 'deck') {
+    context.fillStyle = state.world.weather === 'storm'
+      ? 'rgba(18, 69, 82, 0.5)'
+      : 'rgba(11, 117, 132, 0.4)';
+    context.fillRect(-size * 0.47, -1, size * 0.94, size * 0.35);
+    context.strokeStyle = 'rgba(211, 248, 239, 0.6)';
+    context.lineWidth = 2;
+    context.beginPath();
+    context.moveTo(-size * 0.38, 0);
+    context.quadraticCurveTo(0, -5 - water.foam * 4, size * 0.38, 0);
+    context.stroke();
+  }
+  if (enemy.health < enemy.maxHealth || enemy.phase === 'deck') {
+    const width = isElite ? 50 : 39;
+    context.fillStyle = 'rgba(5, 17, 21, 0.82)';
+    context.fillRect(-width / 2 - 2, -size * 0.72 - 8, width + 4, 6);
+    context.fillStyle = isElite ? '#65d8c8' : '#d4674b';
+    context.fillRect(-width / 2, -size * 0.72 - 6, width * enemy.health / enemy.maxHealth, 2);
   }
   context.restore();
 };
@@ -499,7 +761,7 @@ const drawFacility = (
 const facilityEntities = (
   context: CanvasRenderingContext2D,
   state: TideGameState,
-  bounds: { startX: number; startY: number; width: number },
+  bounds: { startX: number; startY: number; width: number; bob: number },
   now: number,
 ) => {
   const { startX, startY, width } = bounds;
@@ -518,48 +780,47 @@ const facilityEntities = (
     if (!state.raft.modules[moduleId]) return;
     const position = placements[moduleId];
     if (!position) return;
+    const projected = projectWorldPoint({ x: position[0], y: position[1] });
+    projected.y += bounds.bob;
     entities.push({
       id: moduleId,
-      depth: position[1] + (moduleId === 'sail' ? 4 : 0),
-      draw: () => drawFacility(context, moduleId, position[0], position[1], now),
+      depth: projected.y + (moduleId === 'sail' ? 4 : 0),
+      draw: () => drawFacility(context, moduleId, projected.x, projected.y, now),
     });
   });
   return entities;
 };
 
-const atlasFrame = { down: 0, left: 1, right: 2, up: 3 } as const;
+const atlasRow: Record<VisualDirection, number> = {
+  south: 0,
+  southWest: 1,
+  west: 2,
+  northWest: 3,
+  north: 4,
+  northEast: 5,
+  east: 6,
+  southEast: 7,
+};
 
 const drawFallbackDiver = (context: CanvasRenderingContext2D) => {
-  context.fillStyle = '#182637';
-  roundedRect(context, -18, -20, 36, 42, 12);
+  context.fillStyle = '#d59b25';
+  roundedRect(context, -17, -21, 34, 43, 10);
   context.fill();
-  context.fillStyle = '#aa6034';
+  context.fillStyle = '#8d292b';
   context.beginPath();
-  context.arc(0, -23, 18, 0, Math.PI * 2);
+  context.arc(0, -25, 15, Math.PI, Math.PI * 2);
   context.fill();
-  context.fillStyle = '#0f6970';
-  context.beginPath();
-  context.arc(0, -22, 11, 0, Math.PI * 2);
-  context.fill();
-  context.strokeStyle = '#ddae50';
-  context.lineWidth = 3;
-  context.stroke();
-  context.fillStyle = '#d66a32';
-  context.fillRect(-18, -7, 7, 18);
-  context.fillStyle = '#876329';
+  context.fillStyle = '#276d6e';
+  context.fillRect(-15, -13, 30, 19);
+  context.fillStyle = '#4d362a';
   context.fillRect(-15, 19, 12, 13);
   context.fillRect(3, 19, 12, 13);
 };
 
 const actionTarget = (visual: PlayerVisualState, x: number, y: number) => {
-  if (visual.target) return visual.target;
-  const offset = {
-    up: [0, -100],
-    down: [0, 100],
-    left: [-100, 0],
-    right: [100, 0],
-  }[visual.direction];
-  return { x: x + offset[0], y: y + offset[1] };
+  if (visual.target) return projectWorldPoint(visual.target);
+  const direction = visualDirectionVector(visual.direction);
+  return { x: x + direction.x * 100, y: y + direction.y * 100 };
 };
 
 const drawActionOverlay = (
@@ -572,14 +833,16 @@ const drawActionOverlay = (
   const progress = getActionProgress(visual, now);
   const target = actionTarget(visual, x, y);
   if (visual.action === 'hookCast' || visual.action === 'hookPull') {
-    const cast = visual.action === 'hookCast' ? Math.sin(progress * Math.PI * 0.85) : 1 - progress * 0.28;
+    const cast = visual.action === 'hookCast'
+      ? 1 - Math.pow(1 - progress, 3)
+      : 1 - progress * 0.28;
     const endX = x + (target.x - x) * cast;
     const endY = y + (target.y - y) * cast;
     context.save();
     context.strokeStyle = '#d7c28a';
     context.lineWidth = 2;
     context.beginPath();
-    context.moveTo(x + (visual.direction === 'left' ? -18 : 18), y - 14);
+    context.moveTo(x + (visualDirectionVector(visual.direction).x < 0 ? -18 : 18), y - 14);
     context.quadraticCurveTo((x + endX) / 2, Math.min(y, endY) - 38, endX, endY);
     context.stroke();
     context.fillStyle = '#6a7372';
@@ -592,8 +855,12 @@ const drawActionOverlay = (
     context.stroke();
     context.restore();
   }
-  if (visual.action === 'fishCast' || visual.action === 'fishReel') {
-    const cast = visual.action === 'fishCast' ? Math.sin(progress * Math.PI * 0.75) : 1 - progress * 0.45;
+  if (visual.action === 'fishCast' || visual.action === 'fishWait' || visual.action === 'fishReel') {
+    const cast = visual.action === 'fishCast'
+      ? 1 - Math.pow(1 - progress, 3)
+      : visual.action === 'fishWait'
+        ? 1
+        : 1 - Math.pow(progress, 1.4);
     const endX = x + (target.x - x) * cast;
     const endY = y + (target.y - y) * cast;
     context.save();
@@ -626,24 +893,44 @@ const drawActionOverlay = (
     context.setLineDash([]);
     context.restore();
   }
+  if (visual.action === 'attack') {
+    const swing = Math.sin(progress * Math.PI);
+    const vector = visualDirectionVector(visual.direction);
+    const angle = Math.atan2(vector.y, vector.x) - 1.25 + progress * 2.5;
+    context.save();
+    context.translate(x + vector.x * 13, y - 15 + vector.y * 8);
+    context.rotate(angle);
+    context.fillStyle = '#e7d69b';
+    context.fillRect(4, -2, 31, 4);
+    context.fillStyle = '#8e5c36';
+    context.fillRect(-7, -3, 14, 6);
+    context.restore();
+    context.strokeStyle = `rgba(246, 225, 157, ${0.2 + swing * 0.7})`;
+    context.lineWidth = 5;
+    context.beginPath();
+    context.arc(x + vector.x * 22, y - 15 + vector.y * 8, 35, -1.15 + progress * 1.4, -0.2 + progress * 1.4);
+    context.stroke();
+  }
 };
 
 const drawDiver = (
   context: CanvasRenderingContext2D,
-  state: TideGameState,
+  x: number,
+  y: number,
   visual: PlayerVisualState,
+  direction: VisualDirection,
   assets: LoadedTideAssets,
   now: number,
   walking: boolean,
 ) => {
-  const x = state.player.x;
-  const y = state.player.y;
   const actionProgress = getActionProgress(visual, now);
   const walkPhase = now / 105;
   const idleBob = Math.sin(now / 420) * 1.2;
   const walkBob = walking ? Math.abs(Math.sin(walkPhase)) * -2.2 : 0;
   const actionLean = visual.action === 'hookCast'
-    ? Math.sin(actionProgress * Math.PI) * (visual.direction === 'left' ? -0.08 : 0.08)
+    ? Math.sin(actionProgress * Math.PI) * (visualDirectionVector(direction).x < 0 ? -0.08 : 0.08)
+    : visual.action === 'attack'
+      ? Math.sin(actionProgress * Math.PI) * (visualDirectionVector(direction).x < 0 ? -0.12 : 0.12)
     : visual.action === 'hurt'
       ? Math.sin(actionProgress * Math.PI * 5) * 0.08
       : 0;
@@ -658,25 +945,20 @@ const drawDiver = (
   context.fill();
   context.rotate(actionLean);
 
-  if (assets.diver) {
-    const sourceX = atlasFrame[visual.direction] * 64;
-    const stride = walking ? Math.sin(walkPhase) * 1.8 : 0;
+  if (assets.character) {
+    const sourceColumn = walking
+      ? 2 + Math.floor(now / 83) % 6
+      : Math.floor(now / 250) % 2;
+    const sourceX = sourceColumn * 64;
+    const sourceY = atlasRow[direction] * 64;
     context.save();
-    context.translate(stride, 0);
     if (visual.action === 'consume') {
       context.translate(0, -Math.sin(actionProgress * Math.PI) * 3);
     }
-    context.drawImage(assets.diver, sourceX, 0, 64, 64, -32, -37, 64, 64);
+    context.drawImage(assets.character, sourceX, sourceY, 64, 64, -32, -37, 64, 64);
     context.restore();
   } else {
     drawFallbackDiver(context);
-  }
-
-  if (walking) {
-    context.fillStyle = '#d5a84c';
-    const footOffset = Math.sin(walkPhase) * 3;
-    context.fillRect(-15, 24 + footOffset, 12, 4);
-    context.fillRect(3, 24 - footOffset, 12, 4);
   }
   if (visual.action === 'build') {
     const hitPhase = (actionProgress * 3) % 1;
@@ -773,7 +1055,8 @@ const syncActionParticles = (
 ) => {
   const token = visual.commitToken ?? (visual.action + '-' + visual.startedAt);
   const progress = getActionProgress(visual, now);
-  const target = actionTarget(visual, state.player.x, state.player.y);
+  const player = projectWorldPoint(state.player);
+  const target = actionTarget(visual, player.x, player.y);
   if ((visual.action === 'hookCast' || visual.action === 'fishCast') && progress > 0.55) {
     markOnce(memory, token + '-splash', () => emitParticles(memory, 'splash', target.x, target.y, now, 12));
   }
@@ -790,14 +1073,19 @@ const syncActionParticles = (
     [0.34, 0.7].forEach((threshold, index) => {
       if (progress >= threshold) {
         markOnce(memory, token + '-spark-' + index, () => (
-          emitParticles(memory, 'spark', state.player.x + 24, state.player.y + 10, now, 8)
+          emitParticles(memory, 'spark', player.x + 24, player.y + 10, now, 8)
         ));
       }
     });
   }
   if (visual.action === 'consume' && progress > 0.48) {
     markOnce(memory, token + '-bubble', () => (
-      emitParticles(memory, 'bubble', state.player.x + 13, state.player.y - 28, now, 7)
+      emitParticles(memory, 'bubble', player.x + 13, player.y - 28, now, 7)
+    ));
+  }
+  if (visual.action === 'attack' && progress > 0.36) {
+    markOnce(memory, token + '-attack', () => (
+      emitParticles(memory, 'spark', target.x, target.y - 10, now, 8)
     ));
   }
 };
@@ -811,7 +1099,8 @@ const syncExternalEffects = (
     const kind = effect.kind;
     if (kind === 'loot') return;
     markOnce(memory, effect.id, () => {
-      emitParticles(memory, kind, effect.x, effect.y, now, 10);
+      const projected = projectWorldPoint(effect);
+      emitParticles(memory, kind, projected.x, projected.y, now, 10);
     });
   });
 };
@@ -849,8 +1138,9 @@ const drawParticles = (
     if (progress >= 1) return;
     const targetX = effect.targetX ?? WORLD.centerX;
     const targetY = effect.targetY ?? WORLD.height - 12;
-    const x = effect.x + (targetX - effect.x) * progress;
-    const y = effect.y + (targetY - effect.y) * progress - Math.sin(progress * Math.PI) * 90;
+    const source = projectWorldPoint(effect);
+    const x = source.x + (targetX - source.x) * progress;
+    const y = source.y + (targetY - source.y) * progress - Math.sin(progress * Math.PI) * 90;
     context.save();
     context.globalAlpha = 1 - progress * 0.35;
     context.fillStyle = effect.tone ?? '#f2cf66';
@@ -870,14 +1160,15 @@ const drawLighting = (context: CanvasRenderingContext2D, state: TideGameState) =
     ? clamp01((state.world.timeOfDay - 0.68) * 2.4)
     : clamp01((0.16 - state.world.timeOfDay) * 2.4);
   if (night > 0) {
+    const player = projectWorldPoint(state.player);
     context.fillStyle = 'rgba(2, 12, 35, ' + (night * 0.58) + ')';
     context.fillRect(0, 0, WORLD.width, WORLD.height);
     const lamp = context.createRadialGradient(
-      state.player.x,
-      state.player.y,
+      player.x,
+      player.y,
       18,
-      state.player.x,
-      state.player.y,
+      player.x,
+      player.y,
       125,
     );
     lamp.addColorStop(0, 'rgba(241, 198, 86, 0.17)');
@@ -885,6 +1176,16 @@ const drawLighting = (context: CanvasRenderingContext2D, state: TideGameState) =
     context.globalCompositeOperation = 'screen';
     context.fillStyle = lamp;
     context.fillRect(0, 0, WORLD.width, WORLD.height);
+    state.enemies
+      .filter((enemy) => enemy.type === 'lanternBeast')
+      .forEach((enemy) => {
+        const source = projectWorldPoint(enemy);
+        const monsterLamp = context.createRadialGradient(source.x, source.y - 18, 4, source.x, source.y - 18, 82);
+        monsterLamp.addColorStop(0, 'rgba(77, 232, 220, 0.3)');
+        monsterLamp.addColorStop(1, 'rgba(77, 232, 220, 0)');
+        context.fillStyle = monsterLamp;
+        context.fillRect(source.x - 85, source.y - 103, 170, 170);
+      });
     context.globalCompositeOperation = 'source-over';
   }
   const vignette = context.createRadialGradient(
@@ -907,6 +1208,7 @@ export const renderTideScene = (
   visual: PlayerVisualState,
   assets: LoadedTideAssets,
   effects: VisualEffect[],
+  movementIntent: MovementIntent,
   now: number,
   memory: TideRendererMemory,
 ) => {
@@ -914,14 +1216,27 @@ export const renderTideScene = (
   drawOcean(context, state, now);
 
   const nearestId = getNearestCollectableId(state);
-  state.debris.forEach((item) => drawDebris(context, item, now, item.id === nearestId));
+  const backDebris = state.debris.filter((item) => projectWorldPoint(item).y <= WORLD.centerY + 8);
+  const frontDebris = state.debris.filter((item) => projectWorldPoint(item).y > WORLD.centerY + 8);
+  backDebris.forEach((item) => drawDebris(context, item, state, assets, now, item.id === nearestId));
+  state.enemies
+    .filter((enemy) => enemy.phase === 'swimming' && projectWorldPoint(enemy).y <= WORLD.centerY + 8)
+    .forEach((enemy) => drawEnemy(context, enemy, state, assets, now, 0));
 
   const bounds = drawRaftBase(context, state, assets, now);
   if (state.raft.modules.net) {
-    drawNet(context, bounds.startX, bounds.startY + bounds.width + 6, bounds.width);
+    drawNet(context, bounds.startX, bounds.startY + bounds.width + 6, bounds.width, bounds.bob);
   }
+  frontDebris.forEach((item) => drawDebris(context, item, state, assets, now, item.id === nearestId));
+  state.enemies
+    .filter((enemy) => enemy.phase === 'swimming' && projectWorldPoint(enemy).y > WORLD.centerY + 8)
+    .forEach((enemy) => drawEnemy(context, enemy, state, assets, now, 0));
 
-  const moved = Math.hypot(
+  const frameDelta = memory.lastFrameAt ? Math.min(50, now - memory.lastFrameAt) : 16;
+  memory.lastFrameAt = now;
+  memory.renderedPlayerX = interpolatePosition(memory.renderedPlayerX, state.player.x, frameDelta);
+  memory.renderedPlayerY = interpolatePosition(memory.renderedPlayerY, state.player.y, frameDelta);
+  const moved = movementIntent.active || Math.hypot(
     state.player.x - memory.lastPlayerX,
     state.player.y - memory.lastPlayerY,
   ) > 0.2;
@@ -930,14 +1245,41 @@ export const renderTideScene = (
     memory.lastPlayerX = state.player.x;
     memory.lastPlayerY = state.player.y;
   }
-  const walking = visual.action === 'walk'
-    || (visual.action === 'idle' && now - memory.lastMovedAt < 170);
+  const walking = (visual.action === 'walk' || visual.action === 'idle')
+    && (movementIntent.active || now - memory.lastMovedAt < 170);
+  const direction = visual.action === 'idle' || visual.action === 'walk'
+    ? movementIntent.direction
+    : visual.direction;
+  const projectedPlayer = projectWorldPoint({
+    x: memory.renderedPlayerX,
+    y: memory.renderedPlayerY,
+  });
+  projectedPlayer.y += bounds.bob;
 
   const entities = facilityEntities(context, state, bounds, now);
+  state.enemies
+    .filter((enemy) => enemy.phase !== 'swimming')
+    .forEach((enemy) => {
+      const projected = projectWorldPoint(enemy);
+      entities.push({
+        id: enemy.id,
+        depth: projected.y + bounds.bob + (enemy.type === 'lanternBeast' ? 34 : 26),
+        draw: () => drawEnemy(context, enemy, state, assets, now, bounds.bob),
+      });
+    });
   entities.push({
     id: 'player',
-    depth: state.player.y + 28,
-    draw: () => drawDiver(context, state, visual, assets, now, walking),
+    depth: projectedPlayer.y + 28,
+    draw: () => drawDiver(
+      context,
+      projectedPlayer.x,
+      projectedPlayer.y,
+      visual,
+      direction,
+      assets,
+      now,
+      walking,
+    ),
   });
   entities.sort((a, b) => a.depth - b.depth || a.id.localeCompare(b.id));
   entities.forEach((entity) => entity.draw());
